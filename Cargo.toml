@@ -1,0 +1,28 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "leptos_mri_recon"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22.1"
+console_error_panic_hook = "0.1.7"
+getrandom = { version = "0.3.3", features = ["wasm_js"] }
+gloo-events = "0.2.0"
+html = "0.6.3"
+image = "0.25.6"
+js-sys = "0.3.77"
+leptos = { version = "0.7.8", features = ["csr"] }
+ndarray = "0.16.1"
+ndrustfft = "0.5.0"
+nshare = "0.10.0"
+num-complex = "0.4.6"
+num_cpus = "1.16.0"
+rayon = "1.10.0"
+wasm-bindgen = "0.2.93"
+wasm-bindgen-futures = "0.4.50"
+wasm-bindgen-rayon = { version = "1.3.0", features = ["no-bundler"] }
+web-sys = { version = "0.3.77", features = ["CanvasRenderingContext2d", "Document", "Element", "HtmlCanvasElement", "Window", "DomRect", "FileList", "File"] }
+web-time = "1.1.0"
+

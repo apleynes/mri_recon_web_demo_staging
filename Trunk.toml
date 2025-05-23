@@ -1,0 +1,10 @@
+[build]
+pattern_script = '''
+<script type="module">import init, { initThreadPool} from '{base}{js}';await init('{base}{wasm}'); await initThreadPool(navigator.hardwareConcurrency);</script>
+'''
+[serve.headers]
+# see ./assets/_headers for more documentation
+"cross-origin-embedder-policy"= "require-corp"
+"cross-origin-opener-policy"= "same-origin"
+"cross-origin-resource-policy"= "same-site"
+"content-security-policy"="worker-src 'self' blob:; script-src 'unsafe-inline' 'unsafe-eval' 'self' blob:;"
