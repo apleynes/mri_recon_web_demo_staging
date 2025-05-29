@@ -1,12 +1,12 @@
 name: Release to Vercel
 
 on:
-#   push:
-#     branches: [master]
   push:
-    tags:
-      - '[0-9]+.[0-9]+.[0-9]+'
-  workflow_dispatch:
+    branches: [master]
+  # push:
+  #   tags:
+  #     - '[0-9]+.[0-9]+.[0-9]+'
+  # workflow_dispatch:
 
 env:
 CARGO_TERM_COLOR: always
