@@ -21,19 +21,21 @@ jobs:
       - name: git-checkout
         uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          toolchain: nightly-2024-08-02
+          components: clippy, rustfmt, rust-src
+          targets: wasm32-unknown-unknown
+      
       - uses: Swatinem/rust-cache@v2
-      - name: Setup Rust
+      
+      - name: Setup Rust and run checks
         run: |
-          rustup target add wasm32-unknown-unknown
           cargo clippy
           cargo fmt --check
 
       - name: Download and install Trunk binary
         run: wget -qO- https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xzf-
-
 
       - name: Build with Trunk
         run: ./trunk build --release
