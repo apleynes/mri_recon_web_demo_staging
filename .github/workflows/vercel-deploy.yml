@@ -31,7 +31,7 @@ jobs:
       
       - name: Setup Rust and run checks
         run: |
-          cargo clippy
+          cargo clippy --target wasm32-unknown-unknown
           cargo fmt --check
 
       - name: Download and install Trunk binary
