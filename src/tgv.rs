@@ -34,6 +34,8 @@ pub struct GpuTgvContext {
     projection_q_pipeline: Option<ComputePipeline>,
     update_u_pipeline: Option<ComputePipeline>,
     update_w_pipeline: Option<ComputePipeline>,
+    update_p_pipeline: Option<ComputePipeline>,
+    update_q_pipeline: Option<ComputePipeline>,
     bind_group_layout: Option<BindGroupLayout>,
 }
 
@@ -76,6 +78,8 @@ impl GpuTgvContext {
             projection_q_pipeline: None,
             update_u_pipeline: None,
             update_w_pipeline: None,
+            update_p_pipeline: None,
+            update_q_pipeline: None,
             bind_group_layout: None,
         })
     }
@@ -124,11 +128,6 @@ impl GpuTgvContext {
             }
         "#;
 
-        let gradient_shader = self.device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Gradient Compute Shader"),
-            source: ShaderSource::Wgsl(gradient_shader_source.into()),
-        });
-
         // Divergence compute shader
         let divergence_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
@@ -169,77 +168,6 @@ impl GpuTgvContext {
                 output_data[linear_idx] = -(div_x + div_y);
             }
         "#;
-
-        let divergence_shader = self.device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Divergence Compute Shader"),
-            source: ShaderSource::Wgsl(divergence_shader_source.into()),
-        });
-
-        // Create bind group layout
-        let bind_group_layout = self.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("TGV Bind Group Layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::COMPUTE,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("TGV Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        // Create pipelines
-        let gradient_pipeline = self.device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("Gradient Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &gradient_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let divergence_pipeline = self.device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("Divergence Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &divergence_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        self.gradient_pipeline = Some(gradient_pipeline);
-        self.divergence_pipeline = Some(divergence_pipeline);
-        self.bind_group_layout = Some(bind_group_layout);
 
         // Symmetric gradient compute shader
         let sym_gradient_shader_source = r#"
@@ -343,6 +271,79 @@ impl GpuTgvContext {
                 // Store divergence (output has 2 components per pixel)
                 output_data[linear_idx * 2u] = div_x;
                 output_data[linear_idx * 2u + 1u] = div_y;
+            }
+        "#;
+
+        // Update p shader (p = p + sigma * (grad_u_bar - w_bar))
+        let update_p_shader_source = r#"
+            @group(0) @binding(0) var<storage, read_write> p_data: array<f32>;
+            @group(0) @binding(1) var<storage, read> grad_data: array<f32>;
+            @group(0) @binding(2) var<storage, read> w_bar_data: array<f32>;
+            @group(0) @binding(3) var<uniform> params: TgvParams;
+
+            struct TgvParams {
+                width: u32,
+                height: u32,
+                lambda: f32,
+                alpha0: f32,
+                alpha1: f32,
+                tau: f32,
+                sigma: f32,
+                _padding: u32,
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                let idx = global_id.xy;
+                let width = params.width;
+                let height = params.height;
+                
+                if (idx.x >= width || idx.y >= height) {
+                    return;
+                }
+                
+                let linear_idx = idx.y * width + idx.x;
+                
+                // Update p = p + sigma * (grad_u_bar - w_bar)
+                p_data[linear_idx * 2u] += params.sigma * (grad_data[linear_idx * 2u] - w_bar_data[linear_idx * 2u]);
+                p_data[linear_idx * 2u + 1u] += params.sigma * (grad_data[linear_idx * 2u + 1u] - w_bar_data[linear_idx * 2u + 1u]);
+            }
+        "#;
+
+        // Update q shader (q = q + sigma * lambda * sym_grad_w_bar)
+        let update_q_shader_source = r#"
+            @group(0) @binding(0) var<storage, read_write> q_data: array<f32>;
+            @group(0) @binding(1) var<storage, read> sym_grad_data: array<f32>;
+            @group(0) @binding(2) var<uniform> params: TgvParams;
+
+            struct TgvParams {
+                width: u32,
+                height: u32,
+                lambda: f32,
+                alpha0: f32,
+                alpha1: f32,
+                tau: f32,
+                sigma: f32,
+                _padding: u32,
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                let idx = global_id.xy;
+                let width = params.width;
+                let height = params.height;
+                
+                if (idx.x >= width || idx.y >= height) {
+                    return;
+                }
+                
+                let linear_idx = idx.y * width + idx.x;
+                
+                // Update q = q + sigma * lambda * sym_grad_w_bar
+                let factor = params.sigma * params.lambda;
+                q_data[linear_idx * 3u] += factor * sym_grad_data[linear_idx * 3u];
+                q_data[linear_idx * 3u + 1u] += factor * sym_grad_data[linear_idx * 3u + 1u];
+                q_data[linear_idx * 3u + 2u] += factor * sym_grad_data[linear_idx * 3u + 2u];
             }
         "#;
 
@@ -504,6 +505,16 @@ impl GpuTgvContext {
         "#;
 
         // Create shader modules
+        let gradient_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Gradient Compute Shader"),
+            source: ShaderSource::Wgsl(gradient_shader_source.into()),
+        });
+
+        let divergence_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Divergence Compute Shader"),
+            source: ShaderSource::Wgsl(divergence_shader_source.into()),
+        });
+
         let sym_gradient_shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Symmetric Gradient Compute Shader"),
             source: ShaderSource::Wgsl(sym_gradient_shader_source.into()),
@@ -512,6 +523,16 @@ impl GpuTgvContext {
         let sym_divergence_shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Symmetric Divergence Compute Shader"),
             source: ShaderSource::Wgsl(sym_divergence_shader_source.into()),
+        });
+
+        let update_p_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Update P Compute Shader"),
+            source: ShaderSource::Wgsl(update_p_shader_source.into()),
+        });
+
+        let update_q_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Update Q Compute Shader"),
+            source: ShaderSource::Wgsl(update_q_shader_source.into()),
         });
 
         let projection_p_shader = self.device.create_shader_module(ShaderModuleDescriptor {
@@ -534,26 +555,44 @@ impl GpuTgvContext {
             source: ShaderSource::Wgsl(update_w_shader_source.into()),
         });
 
-        // Create all pipelines
-        self.sym_gradient_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("Symmetric Gradient Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &sym_gradient_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        }));
+        // Create bind group layout for 3-input operations (input, output, params)
+        let bind_group_layout = self.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("TGV Bind Group Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
 
-        self.sym_divergence_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some("Symmetric Divergence Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &sym_divergence_shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        }));
-
-        // Create bind group layout for projection shaders (single buffer + params)
+        // Create bind group layout for projection operations (data + params)
         let projection_bind_group_layout = self.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Projection Bind Group Layout"),
             entries: &[
@@ -580,7 +619,7 @@ impl GpuTgvContext {
             ],
         });
 
-        // Create bind group layout for update shaders (multiple buffers + params)
+        // Create bind group layout for 4-input update operations 
         let update_bind_group_layout = self.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("Update Bind Group Layout"),
             entries: &[
@@ -627,7 +666,50 @@ impl GpuTgvContext {
             ],
         });
 
+        // Create bind group layout for update_q (3 inputs: q_data, sym_grad_data, params)
+        let update_q_bind_group_layout = self.device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Update Q Bind Group Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         // Create pipeline layouts
+        let pipeline_layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("TGV Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
         let projection_pipeline_layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Some("Projection Pipeline Layout"),
             bind_group_layouts: &[&projection_bind_group_layout],
@@ -640,7 +722,67 @@ impl GpuTgvContext {
             push_constant_ranges: &[],
         });
 
-        // Create all the missing pipelines
+        let update_q_pipeline_layout = self.device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Update Q Pipeline Layout"),
+            bind_group_layouts: &[&update_q_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Create all pipelines
+        self.gradient_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Gradient Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &gradient_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
+        self.divergence_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Divergence Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &divergence_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
+        self.sym_gradient_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Symmetric Gradient Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &sym_gradient_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
+        self.sym_divergence_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Symmetric Divergence Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &sym_divergence_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
+        self.update_p_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Update P Pipeline"),
+            layout: Some(&update_pipeline_layout),
+            module: &update_p_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
+        self.update_q_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Update Q Pipeline"),
+            layout: Some(&update_q_pipeline_layout),
+            module: &update_q_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
         self.projection_p_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("Projection P Pipeline"),
             layout: Some(&projection_pipeline_layout),
@@ -677,6 +819,8 @@ impl GpuTgvContext {
             cache: None,
         }));
 
+        self.bind_group_layout = Some(bind_group_layout);
+
         Ok(())
     }
 
@@ -696,8 +840,9 @@ impl GpuTgvContext {
         }
 
         let (ny, nx) = centered_kspace.dim();
+        log!("Starting GPU TGV reconstruction with dimensions: {}x{}", ny, nx);
         
-        // Initialize with zero-filled reconstruction on CPU, then transfer to GPU
+        // Initialize with zero-filled reconstruction on CPU
         let mut masked_kspace = Array2::<Complex<f64>>::zeros((ny, nx));
         par_azip!((x in &mut masked_kspace, &y in centered_kspace, &z in centered_mask) {
             if z > 0. {
@@ -705,37 +850,49 @@ impl GpuTgvContext {
             }
         });
         
-        // Get initial reconstruction
         let masked_kspace_view = masked_kspace.view();
         let shifted_masked_kspace = ifft2shift(&masked_kspace_view);
         let u_complex = ifft2(&shifted_masked_kspace.view());
         let u_data: Vec<f32> = u_complex.into_iter().map(|x| x.re as f32).collect();
         
-        // Create GPU buffers with proper API
+        // Create GPU buffers
         let u_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("U Buffer"),
             contents: bytemuck::cast_slice(&u_data),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
-        let w_data = vec![0.0f32; ny * nx * 2]; // 2 components per pixel
+        let w_data = vec![0.0f32; ny * nx * 2];
         let w_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("W Buffer"),
             contents: bytemuck::cast_slice(&w_data),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
-        let p_data = vec![0.0f32; ny * nx * 2]; // 2 components per pixel
+        let p_data = vec![0.0f32; ny * nx * 2];
         let p_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("P Buffer"),
             contents: bytemuck::cast_slice(&p_data),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
-        let q_data = vec![0.0f32; ny * nx * 3]; // 3 components per pixel
+        let q_data = vec![0.0f32; ny * nx * 3];
         let q_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Q Buffer"),
             contents: bytemuck::cast_slice(&q_data),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        });
+
+        // Create u_bar and w_bar buffers (copies of u and w)
+        let u_bar_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("U Bar Buffer"),
+            contents: bytemuck::cast_slice(&u_data),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        });
+
+        let w_bar_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("W Bar Buffer"),
+            contents: bytemuck::cast_slice(&w_data),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
 
@@ -778,16 +935,43 @@ impl GpuTgvContext {
             mapped_at_creation: false,
         });
 
-        // Create readback buffer
-        let readback_buffer = self.device.create_buffer(&BufferDescriptor {
-            label: Some("Readback Buffer"),
+        let div_buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("Divergence Buffer"),
+            size: (ny * nx * std::mem::size_of::<f32>()) as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let fft_residual_buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("FFT Residual Buffer"),
+            size: (ny * nx * std::mem::size_of::<f32>()) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create readback buffers
+        let u_readback_buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("U Readback Buffer"),
             size: (ny * nx * std::mem::size_of::<f32>()) as u64,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        // Get bind group layout
+        let u_staging_buffer = self.device.create_buffer(&BufferDescriptor {
+            label: Some("U Staging Buffer"),
+            size: (ny * nx * std::mem::size_of::<f32>()) as u64,
+            usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Get bind group layouts
         let bind_group_layout = self.bind_group_layout.as_ref().unwrap();
+        let projection_bind_group_layout = &self.projection_p_pipeline.as_ref().unwrap().get_bind_group_layout(0);
+        let update_bind_group_layout = &self.update_u_pipeline.as_ref().unwrap().get_bind_group_layout(0);
+        let update_q_bind_group_layout = &self.update_q_pipeline.as_ref().unwrap().get_bind_group_layout(0);
+
+        let workgroup_count_x = (nx + 15) / 16;
+        let workgroup_count_y = (ny + 15) / 16;
 
         // Main TGV iteration loop
         for iteration in 0..max_iter {
@@ -797,66 +981,304 @@ impl GpuTgvContext {
                 label: Some("TGV Iteration"),
             });
 
-            // For now, implement a basic version that does CPU-GPU hybrid
-            // In a full implementation, we'd need to implement FFT operations on GPU as well
-            
-            // Perform one simplified GPU operation as an example
+            // 1. Compute gradient of u_bar
             {
-                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("Gradient Compute Pass"),
-                    timestamp_writes: None,
-                });
-
-                // Create bind group for gradient computation
                 let gradient_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                     label: Some("Gradient Bind Group"),
                     layout: bind_group_layout,
                     entries: &[
-                        BindGroupEntry {
-                            binding: 0,
-                            resource: u_buffer.as_entire_binding(),
-                        },
-                        BindGroupEntry {
-                            binding: 1,
-                            resource: grad_buffer.as_entire_binding(),
-                        },
-                        BindGroupEntry {
-                            binding: 2,
-                            resource: params_buffer.as_entire_binding(),
-                        },
+                        BindGroupEntry { binding: 0, resource: u_bar_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: grad_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
                     ],
                 });
 
-                if let Some(gradient_pipeline) = &self.gradient_pipeline {
-                    compute_pass.set_pipeline(gradient_pipeline);
-                    compute_pass.set_bind_group(0, &gradient_bind_group, &[]);
-                    
-                    let workgroup_count_x = (nx + 15) / 16;
-                    let workgroup_count_y = (ny + 15) / 16;
-                    compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
-                }
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Gradient Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.gradient_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &gradient_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
             }
-            
+
+            // 2. Update p = p + sigma * (grad_u_bar - w_bar) and project
+            {
+                let update_p_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Update P Bind Group"),
+                    layout: update_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: p_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: grad_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: w_bar_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 3, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Update P Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.update_p_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &update_p_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // Project p
+            {
+                let projection_p_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Projection P Bind Group"),
+                    layout: projection_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: p_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Projection P Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.projection_p_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &projection_p_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // 3. Compute symmetric gradient of w_bar
+            {
+                let sym_gradient_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Symmetric Gradient Bind Group"),
+                    layout: bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: w_bar_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: sym_grad_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Symmetric Gradient Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.sym_gradient_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &sym_gradient_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // 4. Update q = q + sigma * lambda * sym_grad_w_bar
+            {
+                let update_q_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Update Q Bind Group"),
+                    layout: update_q_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: q_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: sym_grad_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Update Q Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.update_q_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &update_q_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // 5. Project q
+            {
+                let projection_q_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Projection Q Bind Group"),
+                    layout: projection_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: q_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Projection Q Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.projection_q_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &projection_q_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // 6. Compute divergence of p
+            {
+                let divergence_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Divergence Bind Group"),
+                    layout: bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: p_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: div_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Divergence Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.divergence_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &divergence_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // Submit GPU commands so far
             self.queue.submit(Some(encoder.finish()));
+
+            // 7. Handle data fidelity term on CPU (FFT operations)
+            // Copy u from GPU to CPU
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Copy U to CPU"),
+            });
+            encoder.copy_buffer_to_buffer(&u_buffer, 0, &u_readback_buffer, 0, u_readback_buffer.size());
+            self.queue.submit(Some(encoder.finish()));
+
+            // Wait for copy to complete and read data
+            let buffer_slice = u_readback_buffer.slice(..);
+            let (sender, receiver) = futures_channel::oneshot::channel();
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                sender.send(result).unwrap();
+            });
+            self.device.poll(wgpu::Maintain::Wait);
+            receiver.await.unwrap()?;
+
+            let data_slice = buffer_slice.get_mapped_range();
+            let u_cpu_data: &[f32] = bytemuck::cast_slice(&data_slice);
             
-            // For now, fall back to CPU for the complete TGV algorithm
-            // A full GPU implementation would require implementing all operations including FFT on GPU
-            break;
+            // Perform FFT operations on CPU
+            let complex_u = Array2::<Complex<f64>>::from_shape_vec(
+                (ny, nx), 
+                u_cpu_data.iter().map(|&x| Complex::new(x as f64, 0.0)).collect()
+            ).unwrap();
+            let fft_u = fft2shift(&fft2(&complex_u.view()).view());
+            let mut residual = Array2::<Complex<f64>>::zeros((ny, nx));
+            par_azip!((x in &mut residual, &y in &fft_u, &z in centered_kspace, &w in centered_mask) {
+                if w > 0. {
+                    *x = y - z;
+                }
+            });
+            let ifft_residual = ifft2(&ifft2shift(&residual.view()).view());
+            let ifft_residual_data: Vec<f32> = ifft_residual.into_iter().map(|x| x.re as f32).collect();
+
+            // Unmap the buffer
+            drop(data_slice);
+            u_readback_buffer.unmap();
+
+            // Copy FFT residual back to GPU
+            self.queue.write_buffer(&fft_residual_buffer, 0, bytemuck::cast_slice(&ifft_residual_data));
+
+            // 8. Update u using divergence and data fidelity term
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Update U"),
+            });
+
+            {
+                let update_u_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Update U Bind Group"),
+                    layout: update_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: u_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: div_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: fft_residual_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 3, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Update U Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.update_u_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &update_u_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // 9. Compute symmetric divergence of q
+            {
+                let sym_divergence_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Symmetric Divergence Bind Group"),
+                    layout: bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: q_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: sym_div_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Symmetric Divergence Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.sym_divergence_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &sym_divergence_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // 10. Update w
+            {
+                let update_w_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Update W Bind Group"),
+                    layout: update_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: w_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: p_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: sym_div_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 3, resource: params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Update W Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.update_w_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &update_w_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // Submit all updates
+            self.queue.submit(Some(encoder.finish()));
+
+            // 11. Update u_bar and w_bar (extrapolation)
+            // For simplicity, we'll copy current values for now
+            // In a complete implementation, you'd implement proper extrapolation
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Update Extrapolation"),
+            });
+            encoder.copy_buffer_to_buffer(&u_buffer, 0, &u_bar_buffer, 0, u_buffer.size());
+            encoder.copy_buffer_to_buffer(&w_buffer, 0, &w_bar_buffer, 0, w_buffer.size());
+            self.queue.submit(Some(encoder.finish()));
         }
 
-        log!("GPU TGV currently implements partial GPU acceleration, falling back to CPU for complete algorithm");
-        
-        // For now, return CPU-computed result
-        return Ok(tgv_mri_reconstruction(
-            centered_kspace,
-            centered_mask,
-            lambda,
-            alpha1,
-            alpha0,
-            tau,
-            sigma,
-            max_iter,
-        ));
+        // Final readback
+        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Final Readback"),
+        });
+        encoder.copy_buffer_to_buffer(&u_buffer, 0, &u_readback_buffer, 0, u_readback_buffer.size());
+        self.queue.submit(Some(encoder.finish()));
+
+        let buffer_slice = u_readback_buffer.slice(..);
+        let (sender, receiver) = futures_channel::oneshot::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            sender.send(result).unwrap();
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        receiver.await.unwrap()?;
+
+        let data_slice = buffer_slice.get_mapped_range();
+        let final_data: &[f32] = bytemuck::cast_slice(&data_slice);
+        let result = Array2::<f32>::from_shape_vec((ny, nx), final_data.to_vec()).unwrap();
+
+        drop(data_slice);
+        u_readback_buffer.unmap();
+
+        log!("GPU TGV reconstruction completed");
+        Ok(result)
     }
 }
 
@@ -1262,7 +1684,6 @@ pub fn tgv_mri_reconstruction(
             *x += &sigma * (y - z);
         });
         let p = proj_p(&p.view(), &(&alpha0));
-        // log!("Min max: {}, {}", p.clone().into_iter().reduce(f32::min).unwrap(), p.clone().into_iter().reduce(f32::max).unwrap());
 
         let sym_grad_w_bar = sym_gradient(&w_bar.view());
         par_azip!((x in &mut q, &y in &sym_grad_w_bar) {
@@ -1298,7 +1719,7 @@ pub fn tgv_mri_reconstruction(
         // Update w
         let sym_div_q = sym_divergence(&q.view());
         par_azip!((x in &mut w, &y in &p, &z in &sym_div_q) {
-            *x -= tau * (-y) * z;
+            *x -= tau * (-y + z);
         });
         
         // Extrapolation
@@ -1307,23 +1728,15 @@ pub fn tgv_mri_reconstruction(
         let t = (1. + (1. + 4. * t_old.powi(2)).sqrt()) / 2.0;
         let theta = (1. - t_old) / t;
         par_azip!((x in &mut u_bar, &y in &u, &z in &u_old) {
-            // *x = 2. * y - z;
             *x = y + theta * (y - z);
         });
         par_azip!((x in &mut w_bar, &y in &w, &z in &w_old) {
-            // *x = 2. * y - z;
             *x = y + theta * (y - z);
         });
 
         let total_residual: f64 = residual.map(|x| x.re.powi(2)).sum();
-        // log!("Iteration: {}, Total residual: {:.3e}", i, total_residual);
-
-
-        // log!("Min max: {}, {}", u.clone().into_iter().reduce(f32::min).unwrap(), u.clone().into_iter().reduce(f32::max).unwrap());
+        log!("Iteration: {}, Total residual: {:.3e}", i, total_residual);
     }
-    // Convert to real
-    // let u = Array2::<f32>::from_shape_vec((ny, nx), u.into_iter().map(|x| x.re as f32).collect()).unwrap();
-    // log!("Min max: {}, {}", u.clone().into_iter().reduce(f32::min).unwrap(), u.clone().into_iter().reduce(f32::max).unwrap());
 
     let end_time = Instant::now();
     log!("Time taken: {:?}", end_time.duration_since(start_time));

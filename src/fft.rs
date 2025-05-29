@@ -341,34 +341,11 @@ async fn get_gpu_context() -> Result<&'static mut GpuFftContext, Box<dyn std::er
 async fn fft2_gpu(gray_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Complex<f64>>, Box<dyn std::error::Error>> {
     let (ny, nx) = gray_img.dim();
     
-    // Find next power-of-two sizes
-    let padded_ny = ny.next_power_of_two();
-    let padded_nx = nx.next_power_of_two();
+    leptos::logging::log!("DEBUG: GPU FFT input dimensions: {}x{}", ny, nx);
     
-    // Check if padding would create too large arrays (potential OOM)
-    let padded_elements = padded_ny * padded_nx;
-    let original_elements = ny * nx;
-    let memory_ratio = padded_elements as f64 / original_elements as f64;
-    
-    leptos::logging::log!("DEBUG: GPU FFT - original: {}x{} ({}), padded: {}x{} ({}), ratio: {:.2}x", 
-        ny, nx, original_elements, padded_ny, padded_nx, padded_elements, memory_ratio);
-    
-    // If padding increases memory usage by more than 3x, fall back to CPU
-    if memory_ratio > 3.0 {
-        leptos::logging::log!("DEBUG: GPU FFT padding ratio too high ({:.2}x), falling back to CPU", memory_ratio);
-        return Err("Padding ratio too high for GPU".into());
-    }
-    
-    // Try to create padded array - if this fails, we'll get an error instead of OOM
-    let mut padded = match Array2::<Complex<f64>>::zeros((padded_ny, padded_nx)) {
-        arr => arr,
-    };
-    
-    // Copy original data to top-left corner
-    for i in 0..ny {
-        for j in 0..nx {
-            padded[[i, j]] = gray_img[[i, j]];
-        }
+    // Input should already be padded to power-of-two dimensions
+    if !ny.is_power_of_two() || !nx.is_power_of_two() {
+        return Err("GPU FFT requires power-of-two dimensions (input should be pre-padded)".into());
     }
     
     let ctx = match get_gpu_context().await {
@@ -379,8 +356,11 @@ async fn fft2_gpu(gray_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Comp
         }
     };
     
-    // Row-wise FFTs on padded data
-    for mut row in padded.axis_iter_mut(Axis(0)) {
+    // Work directly with the input data - no padding or cropping
+    let mut result = gray_img.to_owned();
+    
+    // Row-wise FFTs
+    for mut row in result.axis_iter_mut(Axis(0)) {
         let mut row_data: Vec<Complex<f64>> = row.to_vec();
         if let Err(e) = ctx.fft_1d(&mut row_data, false).await {
             leptos::logging::log!("DEBUG: GPU FFT row failed: {}", e);
@@ -391,61 +371,30 @@ async fn fft2_gpu(gray_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Comp
         }
     }
     
-    // Column-wise FFTs on padded data
-    for j in 0..padded_nx {
-        let mut col_data: Vec<Complex<f64>> = padded.column(j).to_vec();
+    // Column-wise FFTs
+    for j in 0..nx {
+        let mut col_data: Vec<Complex<f64>> = result.column(j).to_vec();
         if let Err(e) = ctx.fft_1d(&mut col_data, false).await {
             leptos::logging::log!("DEBUG: GPU FFT column failed: {}", e);
             return Err(e);
         }
         for (i, &val) in col_data.iter().enumerate() {
-            padded[[i, j]] = val;
+            result[[i, j]] = val;
         }
     }
     
-    // Extract result back to original size
-    let mut result = Array2::<Complex<f64>>::zeros((ny, nx));
-    for i in 0..ny {
-        for j in 0..nx {
-            result[[i, j]] = padded[[i, j]];
-        }
-    }
-    
-    leptos::logging::log!("DEBUG: GPU FFT completed successfully");
+    leptos::logging::log!("DEBUG: GPU FFT completed successfully, output dimensions: {}x{}", result.nrows(), result.ncols());
     Ok(result)
 }
 
 async fn ifft2_gpu(fft_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Complex<f64>>, Box<dyn std::error::Error>> {
     let (ny, nx) = fft_img.dim();
     
-    // Find next power-of-two sizes
-    let padded_ny = ny.next_power_of_two();
-    let padded_nx = nx.next_power_of_two();
+    leptos::logging::log!("DEBUG: GPU IFFT input dimensions: {}x{}", ny, nx);
     
-    // Check if padding would create too large arrays (potential OOM)
-    let padded_elements = padded_ny * padded_nx;
-    let original_elements = ny * nx;
-    let memory_ratio = padded_elements as f64 / original_elements as f64;
-    
-    leptos::logging::log!("DEBUG: GPU IFFT - original: {}x{} ({}), padded: {}x{} ({}), ratio: {:.2}x", 
-        ny, nx, original_elements, padded_ny, padded_nx, padded_elements, memory_ratio);
-    
-    // If padding increases memory usage by more than 3x, fall back to CPU
-    if memory_ratio > 3.0 {
-        leptos::logging::log!("DEBUG: GPU IFFT padding ratio too high ({:.2}x), falling back to CPU", memory_ratio);
-        return Err("Padding ratio too high for GPU".into());
-    }
-    
-    // Try to create padded array - if this fails, we'll get an error instead of OOM
-    let mut padded = match Array2::<Complex<f64>>::zeros((padded_ny, padded_nx)) {
-        arr => arr,
-    };
-    
-    // Copy original data to top-left corner
-    for i in 0..ny {
-        for j in 0..nx {
-            padded[[i, j]] = fft_img[[i, j]];
-        }
+    // Input should be at power-of-two dimensions
+    if !ny.is_power_of_two() || !nx.is_power_of_two() {
+        return Err("GPU IFFT requires power-of-two dimensions".into());
     }
     
     let ctx = match get_gpu_context().await {
@@ -456,8 +405,11 @@ async fn ifft2_gpu(fft_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Comp
         }
     };
     
-    // Row-wise IFFTs on padded data
-    for mut row in padded.axis_iter_mut(Axis(0)) {
+    // Work directly with the input data - no padding or cropping
+    let mut result = fft_img.to_owned();
+    
+    // Row-wise IFFTs
+    for mut row in result.axis_iter_mut(Axis(0)) {
         let mut row_data: Vec<Complex<f64>> = row.to_vec();
         if let Err(e) = ctx.fft_1d(&mut row_data, true).await {
             leptos::logging::log!("DEBUG: GPU IFFT row failed: {}", e);
@@ -468,30 +420,23 @@ async fn ifft2_gpu(fft_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Comp
         }
     }
     
-    // Column-wise IFFTs on padded data
-    for j in 0..padded_nx {
-        let mut col_data: Vec<Complex<f64>> = padded.column(j).to_vec();
+    // Column-wise IFFTs
+    for j in 0..nx {
+        let mut col_data: Vec<Complex<f64>> = result.column(j).to_vec();
         if let Err(e) = ctx.fft_1d(&mut col_data, true).await {
             leptos::logging::log!("DEBUG: GPU IFFT column failed: {}", e);
             return Err(e);
         }
         for (i, &val) in col_data.iter().enumerate() {
-            padded[[i, j]] = val;
+            result[[i, j]] = val;
         }
     }
     
-    // Extract result back to original size with proper normalization
-    let mut result = Array2::<Complex<f64>>::zeros((ny, nx));
-    // The normalization factor should account for the FFT size, not the crop
-    let normalization = (padded_ny * padded_nx) as f64;
+    // Apply proper normalization
+    let normalization = (ny * nx) as f64;
+    result.mapv_inplace(|x| x / normalization);
     
-    for i in 0..ny {
-        for j in 0..nx {
-            result[[i, j]] = padded[[i, j]] / normalization;
-        }
-    }
-    
-    leptos::logging::log!("DEBUG: GPU IFFT completed successfully");
+    leptos::logging::log!("DEBUG: GPU IFFT completed successfully, output dimensions: {}x{}", result.nrows(), result.ncols());
     Ok(result)
 }
 
@@ -522,23 +467,27 @@ pub async fn fft2_auto(gray_img: &ArrayView2<'_, Complex<f64>>) -> Array2<Comple
     
     leptos::logging::log!("DEBUG: fft2_auto called with input dimensions: {}x{}", ny, nx);
     
-    // Temporarily force CPU FFT to debug issues
-    leptos::logging::log!("DEBUG: Forcing CPU FFT for debugging");
+    // Temporarily disable GPU FFT - force CPU FFT
+    leptos::logging::log!("DEBUG: GPU FFT disabled, using CPU FFT");
     let result = fft2(gray_img);
     leptos::logging::log!("DEBUG: CPU FFT result dimensions: {}x{}", result.nrows(), result.ncols());
     return result;
     
-    // GPU FFT code (temporarily disabled)
+    // GPU FFT code (disabled)
     /*
-    // Try GPU FFT first (now supports arbitrary sizes via padding)
-    match fft2_gpu(gray_img).await {
-        Ok(result) => {
-            leptos::logging::log!("Using GPU FFT (size: {}x{}, padded to {}x{}) - result size: {}x{}", ny, nx, ny.next_power_of_two(), nx.next_power_of_two(), result.nrows(), result.ncols());
-            return result;
-        },
-        Err(e) => {
-            leptos::logging::log!("GPU FFT failed ({}), falling back to CPU", e);
+    // Try GPU FFT first (now expects power-of-two input)
+    if ny.is_power_of_two() && nx.is_power_of_two() {
+        match fft2_gpu(gray_img).await {
+            Ok(result) => {
+                leptos::logging::log!("Using GPU FFT (size: {}x{}) - result size: {}x{}", ny, nx, result.nrows(), result.ncols());
+                return result;
+            },
+            Err(e) => {
+                leptos::logging::log!("GPU FFT failed ({}), falling back to CPU", e);
+            }
         }
+    } else {
+        leptos::logging::log!("Input dimensions not power-of-two ({}x{}), using CPU FFT", ny, nx);
     }
     
     leptos::logging::log!("Using CPU FFT (size: {}x{})", ny, nx);
@@ -553,23 +502,27 @@ pub async fn ifft2_auto(fft_img: &ArrayView2<'_, Complex<f64>>) -> Array2<Comple
     
     leptos::logging::log!("DEBUG: ifft2_auto called with input dimensions: {}x{}", ny, nx);
     
-    // Temporarily force CPU IFFT to debug the black image issue
-    leptos::logging::log!("DEBUG: Forcing CPU IFFT for debugging");
+    // Temporarily disable GPU IFFT - force CPU IFFT
+    leptos::logging::log!("DEBUG: GPU IFFT disabled, using CPU IFFT");
     let result = ifft2(fft_img);
     leptos::logging::log!("DEBUG: CPU IFFT result dimensions: {}x{}", result.nrows(), result.ncols());
     return result;
     
-    // GPU IFFT code (temporarily disabled)
+    // GPU IFFT code (disabled)
     /*
-    // Try GPU IFFT first (now supports arbitrary sizes via padding)
-    match ifft2_gpu(fft_img).await {
-        Ok(result) => {
-            leptos::logging::log!("Using GPU IFFT (size: {}x{}, padded to {}x{}) - result size: {}x{}", ny, nx, ny.next_power_of_two(), nx.next_power_of_two(), result.nrows(), result.ncols());
-            return result;
-        },
-        Err(e) => {
-            leptos::logging::log!("GPU IFFT failed ({}), falling back to CPU", e);
+    // Try GPU IFFT first (now expects power-of-two input)
+    if ny.is_power_of_two() && nx.is_power_of_two() {
+        match ifft2_gpu(fft_img).await {
+            Ok(result) => {
+                leptos::logging::log!("Using GPU IFFT (size: {}x{}) - result size: {}x{}", ny, nx, result.nrows(), result.ncols());
+                return result;
+            },
+            Err(e) => {
+                leptos::logging::log!("GPU IFFT failed ({}), falling back to CPU", e);
+            }
         }
+    } else {
+        leptos::logging::log!("Input dimensions not power-of-two ({}x{}), using CPU IFFT", ny, nx);
     }
     
     leptos::logging::log!("Using CPU IFFT (size: {}x{})", ny, nx);

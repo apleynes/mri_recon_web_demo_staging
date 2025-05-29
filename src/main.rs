@@ -181,6 +181,12 @@ fn App() -> impl IntoView {
     let (img_width, set_img_width) = signal(32);
     let (img_height, set_img_height) = signal(32);
 
+    // Add signals for original and padded dimensions
+    let (original_img_width, set_original_img_width) = signal(32);
+    let (original_img_height, set_original_img_height) = signal(32);
+    let (fft_width, set_fft_width) = signal(32);
+    let (fft_height, set_fft_height) = signal(32);
+
     // Initialize with empty vector instead of dummy 32x32 data
     let (img_fft_vec, set_img_fft_vec) = signal(Vec::<Complex<f64>>::new());
     let (reconstructed_img_zero_filled, set_reconstructed_img_zero_filled) = signal(String::new());
@@ -208,6 +214,10 @@ fn App() -> impl IntoView {
         let img_fft_vec = img_fft_vec;
         let img_width = img_width;
         let img_height = img_height;
+        let original_img_width = original_img_width;
+        let original_img_height = original_img_height;
+        let fft_width = fft_width;
+        let fft_height = fft_height;
         let tgv2_lam = tgv2_lam.get_untracked();
         let tgv2_iter = tgv2_iter.get_untracked();
         
@@ -225,6 +235,10 @@ fn App() -> impl IntoView {
                     img_fft_vec, 
                     img_width, 
                     img_height, 
+                    original_img_width,
+                    original_img_height,
+                    fft_width,
+                    fft_height,
                     set_reconstructed_img_zero_filled, 
                     ReconMode::ZeroFilled, 
                     ReconParams { tgv2_lam, tgv2_iter },
@@ -244,6 +258,10 @@ fn App() -> impl IntoView {
                     img_fft_vec, 
                     img_width, 
                     img_height, 
+                    original_img_width,
+                    original_img_height,
+                    fft_width,
+                    fft_height,
                     set_reconstructed_img_compressed_sensing, 
                     ReconMode::TGV2, 
                     ReconParams { tgv2_lam, tgv2_iter },
@@ -368,8 +386,23 @@ fn App() -> impl IntoView {
             let input_element = file_input.get();
             let (base64, width, height) = convert_image_input_to_base_64(input_element.clone()).await.expect("Failed to process image");
             set_original_img_src.set(base64);
+            
+            // Store original dimensions (for display)
             set_img_width.set(width);
             set_img_height.set(height);
+            
+            // Store original image dimensions
+            set_original_img_width.set(width);
+            set_original_img_height.set(height);
+            
+            // Calculate padded dimensions (next power of 2)
+            let padded_width = (width as usize).next_power_of_two() as u32;
+            let padded_height = (height as usize).next_power_of_two() as u32;
+            set_fft_width.set(padded_width);
+            set_fft_height.set(padded_height);
+            
+            leptos::logging::log!("DEBUG: Image dimensions - Original: {}x{}, Padded: {}x{}", width, height, padded_width, padded_height);
+            
             // Convert image to array
             let input = input_element.clone().ok_or("No input element found").expect("No input element found");
             let files = input.files().ok_or("No files selected").expect("No files selected");
@@ -388,23 +421,49 @@ fn App() -> impl IntoView {
                 .map_err(|e| format!("Failed to decode image: {:?}", e)).expect("Failed to decode image");
 
             // Resize image to 512x512 if it's bigger (redo this. TODO: Refactor)
-            let mut width = img.width();
-            let mut height = img.height();
-            if width > 512 || height > 512 {
+            let mut final_width = img.width();
+            let mut final_height = img.height();
+            if final_width > 512 || final_height > 512 {
                 img = img.resize_exact(512, 512, FilterType::CatmullRom);
-                width = 512;
-                height = 512;
+                final_width = 512;
+                final_height = 512;
+                
+                // Update dimensions after resizing
+                set_img_width.set(final_width);
+                set_img_height.set(final_height);
+                set_original_img_width.set(final_width);
+                set_original_img_height.set(final_height);
+                
+                // Recalculate padded dimensions
+                let padded_width = (final_width as usize).next_power_of_two() as u32;
+                let padded_height = (final_height as usize).next_power_of_two() as u32;
+                set_fft_width.set(padded_width);
+                set_fft_height.set(padded_height);
+                
+                leptos::logging::log!("DEBUG: After resize - Original: {}x{}, Padded: {}x{}", final_width, final_height, padded_width, padded_height);
             }
+            
             let img: GrayImage = img.into_luma8();
             let img = img.as_ndarray2();
             let complex_img: Array2<Complex<f64>> = img.map(|x| Complex::new(*x as f64, 0.0));
             
-            // Add logging before FFT processing
-            leptos::logging::log!("DEBUG: Input image dimensions before FFT: {}x{} (total elements: {})", complex_img.nrows(), complex_img.ncols(), complex_img.len());
-            leptos::logging::log!("DEBUG: img_width signal: {}, img_height signal: {}", width, height);
+            // Pad the image to power-of-two size BEFORE FFT
+            let padded_width = fft_width.get() as usize;
+            let padded_height = fft_height.get() as usize;
+            let mut padded_img = Array2::<Complex<f64>>::zeros((padded_height, padded_width));
             
-            // Use GPU-accelerated FFT with fallback
-            let fft_vec = fft::fft2_auto(&complex_img.view()).await;
+            // Copy original image to top-left corner of padded array
+            for i in 0..complex_img.nrows() {
+                for j in 0..complex_img.ncols() {
+                    padded_img[[i, j]] = complex_img[[i, j]];
+                }
+            }
+            
+            // Add logging before FFT processing
+            leptos::logging::log!("DEBUG: Input image dimensions before FFT: {}x{} (padded to: {}x{})", complex_img.nrows(), complex_img.ncols(), padded_height, padded_width);
+            
+            // Use GPU-accelerated FFT with fallback on PADDED image
+            let fft_vec = fft::fft2_auto(&padded_img.view()).await;
             
             // Add logging after FFT processing
             leptos::logging::log!("DEBUG: FFT result dimensions: {}x{} (total elements: {})", fft_vec.nrows(), fft_vec.ncols(), fft_vec.len());
@@ -417,7 +476,7 @@ fn App() -> impl IntoView {
             let (v, offset) = fft_vec.into_raw_vec_and_offset();
             
             // Add logging for stored vector
-            leptos::logging::log!("DEBUG: Storing FFT vector with {} elements", v.len());
+            leptos::logging::log!("DEBUG: Storing FFT vector with {} elements (FFT size: {}x{})", v.len(), padded_height, padded_width);
             
             set_img_fft_vec.set(v);
 
@@ -427,10 +486,10 @@ fn App() -> impl IntoView {
             ctx.set_fill_style_str("black");
             ctx.fill_rect(0.0, 0.0, img_width.get() as f64, img_height.get() as f64);
 
-            // Clear the reconstructed image
+            // Clear the reconstructed image (use original dimensions for display)
             let reconstructed_img = Array2::zeros((img_height.get() as usize, img_width.get() as usize));
     
-            let reconstructed_img = GrayImage::from_raw(width as u32, height as u32, reconstructed_img.into_iter().collect()).unwrap();
+            let reconstructed_img = GrayImage::from_raw(final_width as u32, final_height as u32, reconstructed_img.into_iter().collect()).unwrap();
             let mut reconstructed_buffer = Vec::new();
             reconstructed_img.write_to(&mut Cursor::new(&mut reconstructed_buffer), ImageFormat::Png)
                 .map_err(|e| format!("Failed to encode reconstructed image: {:?}", e)).expect("Failed to encode reconstructed image");
@@ -646,6 +705,10 @@ fn read_canvas_and_reconstruct(
     img_fft_vec: ReadSignal<Vec<Complex<f64>>>,
     img_width: ReadSignal<u32>,
     img_height: ReadSignal<u32>,
+    original_img_width: ReadSignal<u32>,
+    original_img_height: ReadSignal<u32>,
+    fft_width: ReadSignal<u32>,
+    fft_height: ReadSignal<u32>,
     set_reconstructed_img: WriteSignal<String>,
     recon_mode: ReconMode,
     recon_params: ReconParams,
@@ -654,6 +717,10 @@ fn read_canvas_and_reconstruct(
     spawn_local(async move {
         let width = img_width.get() as usize;
         let height = img_height.get() as usize;
+        let original_width = original_img_width.get() as usize;
+        let original_height = original_img_height.get() as usize;
+        let fft_width_val = fft_width.get() as usize;
+        let fft_height_val = fft_height.get() as usize;
         let fft_vec = img_fft_vec.get();
         
         // Early guard: Don't proceed if no valid image data is available
@@ -663,17 +730,18 @@ fn read_canvas_and_reconstruct(
             return;
         }
         
-        if fft_vec.len() != height * width {
-            leptos::logging::log!("ERROR: Size mismatch! Expected {} elements, got {}. Skipping reconstruction.", height * width, fft_vec.len());
+        // Check against FFT dimensions, not original dimensions
+        if fft_vec.len() != fft_height_val * fft_width_val {
+            leptos::logging::log!("ERROR: Size mismatch! Expected {} elements (FFT: {}x{}), got {}. Skipping reconstruction.", 
+                fft_height_val * fft_width_val, fft_height_val, fft_width_val, fft_vec.len());
             set_reconstruction_in_progress.set(false);
             return;
         }
         
-        // Check available memory before proceeding with large allocations
-        leptos::logging::log!("DEBUG: Starting reconstruction for {}x{} image ({} MB estimated)", 
-            height, width, (height * width * 32) / (1024 * 1024)); // rough estimate
+        leptos::logging::log!("DEBUG: Starting reconstruction - Original: {}x{}, Display: {}x{}, FFT: {}x{}", 
+            original_height, original_width, height, width, fft_height_val, fft_width_val);
         
-        // Get sampling mask from canvas using ImageData instead of PNG conversion
+        // Get sampling mask from canvas using ImageData (canvas is at display size)
         let canvas = canvas_ref
             .get()
             .expect("canvas should be in the DOM");
@@ -685,15 +753,15 @@ fn read_canvas_and_reconstruct(
             .dyn_into::<CanvasRenderingContext2d>()
             .unwrap();
         
-        // Get ImageData directly from canvas instead of PNG conversion
+        // Get ImageData directly from canvas (canvas size = display size)
         let image_data = ctx
             .get_image_data(0.0, 0.0, width as f64, height as f64)
             .expect("Failed to get image data from canvas");
         
         let data = image_data.data();
         
-        // Create FFT image array first (reuse the existing vector to avoid extra allocation)
-        let fft_img = match Array2::from_shape_vec((height, width), fft_vec) {
+        // Create FFT image array using FFT dimensions
+        let fft_img = match Array2::from_shape_vec((fft_height_val, fft_width_val), fft_vec) {
             Ok(arr) => arr,
             Err(e) => {
                 leptos::logging::log!("ERROR: Failed to create FFT array: {:?}", e);
@@ -702,50 +770,74 @@ fn read_canvas_and_reconstruct(
             }
         };
         
-        // Create masked FFT image and apply mask directly without intermediate mask array
-        let mut masked_fft_img = Array2::<Complex<f64>>::zeros((height, width));
+        // Create masked FFT image at FFT dimensions
+        let mut masked_fft_img = Array2::<Complex<f64>>::zeros((fft_height_val, fft_width_val));
         
-        for i in 0..height {
-            for j in 0..width {
-                let pixel_index = (i * width + j) * 4; // RGBA format
-                let r = data[pixel_index] as f64;
-                let g = data[pixel_index + 1] as f64; 
-                let b = data[pixel_index + 2] as f64;
-                // Average RGB values and threshold
-                let brightness = (r + g + b) / 3.0;
+        // Apply mask by scaling canvas coordinates to FFT coordinates
+        for i in 0..fft_height_val {
+            for j in 0..fft_width_val {
+                // Map FFT coordinates to canvas coordinates
+                let canvas_i = (i * height) / fft_height_val;
+                let canvas_j = (j * width) / fft_width_val;
                 
-                if brightness > 128.0 {
-                    masked_fft_img[[i, j]] = fft_img[[i, j]];
-                }
-                // else leave as zero (already initialized)
+                // Only apply mask within the canvas bounds
+                if canvas_i < height && canvas_j < width {
+                    let pixel_index = (canvas_i * width + canvas_j) * 4; // RGBA format
+                    let r = data[pixel_index] as f64;
+                    let g = data[pixel_index + 1] as f64; 
+                    let b = data[pixel_index + 2] as f64;
+                    // Average RGB values and threshold
+                    let brightness = (r + g + b) / 3.0;
+                    
+                    if brightness > 128.0 {
+                        masked_fft_img[[i, j]] = fft_img[[i, j]];
+                    }
+                } 
+                // Outside canvas area remains zero (masked out)
             }
         }
         
-        leptos::logging::log!("DEBUG: Created masked FFT array, starting reconstruction");
+        leptos::logging::log!("DEBUG: Created masked FFT array at FFT dimensions ({}x{}), starting reconstruction", fft_height_val, fft_width_val);
 
         let reconstructed_img = match recon_mode {
             ReconMode::ZeroFilled => {
-                // Use GPU-accelerated IFFT with fallback
+                // Use GPU-accelerated IFFT with fallback - preserve FFT dimensions
                 let shifted = fft::ifft2shift(&masked_fft_img.view());
                 let ifft_result = fft::ifft2_auto(&shifted.view()).await;
-                ifft_result.map(|x| x.re as f32)
+                
+                // Crop back to original size AFTER IFFT in spatial domain
+                let mut cropped_result = Array2::<f32>::zeros((original_height, original_width));
+                for i in 0..original_height {
+                    for j in 0..original_width {
+                        if i < ifft_result.nrows() && j < ifft_result.ncols() {
+                            cropped_result[[i, j]] = ifft_result[[i, j]].re as f32;
+                        }
+                    }
+                }
+                cropped_result
             },
             ReconMode::TGV2 => {
-                // For TGV, create a minimal mask array only when needed
-                let mut mask = Array2::<f32>::zeros((height, width));
-                for i in 0..height {
-                    for j in 0..width {
-                        let pixel_index = (i * width + j) * 4;
-                        let r = data[pixel_index] as f64;
-                        let g = data[pixel_index + 1] as f64; 
-                        let b = data[pixel_index + 2] as f64;
-                        let brightness = (r + g + b) / 3.0;
-                        mask[[i, j]] = if brightness > 128.0 { 1.0 } else { 0.0 };
+                // For TGV, create mask at FFT dimensions
+                let mut mask = Array2::<f32>::zeros((fft_height_val, fft_width_val));
+                for i in 0..fft_height_val {
+                    for j in 0..fft_width_val {
+                        // Map FFT coordinates to canvas coordinates
+                        let canvas_i = (i * height) / fft_height_val;
+                        let canvas_j = (j * width) / fft_width_val;
+                        
+                        if canvas_i < height && canvas_j < width {
+                            let pixel_index = (canvas_i * width + canvas_j) * 4;
+                            let r = data[pixel_index] as f64;
+                            let g = data[pixel_index + 1] as f64; 
+                            let b = data[pixel_index + 2] as f64;
+                            let brightness = (r + g + b) / 3.0;
+                            mask[[i, j]] = if brightness > 128.0 { 1.0 } else { 0.0 };
+                        }
                     }
                 }
                 
                 // Use GPU-accelerated TGV with fallback
-                tgv::tgv_mri_reconstruction_auto(
+                let tgv_result = tgv::tgv_mri_reconstruction_auto(
                     &masked_fft_img.view(), 
                     &mask.view(), 
                     recon_params.tgv2_lam, 
@@ -754,15 +846,26 @@ fn read_canvas_and_reconstruct(
                     1.0/(12.0_f32).sqrt(), 
                     1.0/(12.0_f32).sqrt(), 
                     recon_params.tgv2_iter as usize
-                ).await
+                ).await;
+                
+                // Crop back to original size
+                let mut cropped_result = Array2::<f32>::zeros((original_height, original_width));
+                for i in 0..original_height {
+                    for j in 0..original_width {
+                        if i < tgv_result.nrows() && j < tgv_result.ncols() {
+                            cropped_result[[i, j]] = tgv_result[[i, j]];
+                        }
+                    }
+                }
+                cropped_result
             },
         };
         
-        leptos::logging::log!("DEBUG: Reconstruction complete, normalizing image");
+        leptos::logging::log!("DEBUG: Reconstruction complete, normalizing image (final size: {}x{})", reconstructed_img.nrows(), reconstructed_img.ncols());
         
         let reconstructed_img = normalize_image_by_min_max(reconstructed_img);
         
-        let reconstructed_img = GrayImage::from_raw(width as u32, height as u32, reconstructed_img.into_iter().collect()).unwrap();
+        let reconstructed_img = GrayImage::from_raw(original_width as u32, original_height as u32, reconstructed_img.into_iter().collect()).unwrap();
         let mut reconstructed_buffer = Vec::new();
         reconstructed_img.write_to(&mut Cursor::new(&mut reconstructed_buffer), ImageFormat::Png)
             .map_err(|e| format!("Failed to encode reconstructed image: {:?}", e)).expect("Failed to encode reconstructed image");
