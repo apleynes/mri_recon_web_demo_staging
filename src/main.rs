@@ -181,10 +181,13 @@ fn App() -> impl IntoView {
     let (img_width, set_img_width) = signal(32);
     let (img_height, set_img_height) = signal(32);
 
-    let (img_fft_vec, set_img_fft_vec) = signal(Array2::<Complex<f64>>::zeros((32, 32)).into_raw_vec_and_offset().0);
+    // Initialize with empty vector instead of dummy 32x32 data
+    let (img_fft_vec, set_img_fft_vec) = signal(Vec::<Complex<f64>>::new());
     let (reconstructed_img_zero_filled, set_reconstructed_img_zero_filled) = signal(String::new());
     let (reconstructed_img_compressed_sensing, set_reconstructed_img_compressed_sensing) = signal(String::new());
 
+    // Add reconstruction in progress flag to prevent overlapping calls
+    let (reconstruction_in_progress, set_reconstruction_in_progress) = signal(false);
     
     let file_input: NodeRef<Input> = NodeRef::new();
     let (original_img_src, set_original_img_src) = signal(String::new());
@@ -198,14 +201,59 @@ fn App() -> impl IntoView {
     let (tgv2_lam, set_tgv2_lam) = signal(1.0);
     let (tgv2_iter, set_tgv2_iter) = signal(5 as usize);
     
+    // Debounced reconstruction function to prevent excessive calls
+    let debounced_reconstruct = move |mode: ReconMode| {
+        // Skip if reconstruction is already in progress
+        if reconstruction_in_progress.get_untracked() {
+            leptos::logging::log!("DEBUG: Reconstruction already in progress, skipping");
+            return;
+        }
+        
+        set_reconstruction_in_progress.set(true);
+        
+        let canvas_ref = canvas_ref;
+        let img_fft_vec = img_fft_vec;
+        let img_width = img_width;
+        let img_height = img_height;
+        let set_reconstruction_in_progress = set_reconstruction_in_progress;
+        let tgv2_lam = tgv2_lam.get_untracked();
+        let tgv2_iter = tgv2_iter.get_untracked();
+        
+        match mode {
+            ReconMode::ZeroFilled => {
+                read_canvas_and_reconstruct(
+                    canvas_ref, 
+                    img_fft_vec, 
+                    img_width, 
+                    img_height, 
+                    set_reconstructed_img_zero_filled, 
+                    ReconMode::ZeroFilled, 
+                    ReconParams { tgv2_lam, tgv2_iter },
+                    set_reconstruction_in_progress
+                );
+            },
+            ReconMode::TGV2 => {
+                read_canvas_and_reconstruct(
+                    canvas_ref, 
+                    img_fft_vec, 
+                    img_width, 
+                    img_height, 
+                    set_reconstructed_img_compressed_sensing, 
+                    ReconMode::TGV2, 
+                    ReconParams { tgv2_lam, tgv2_iter },
+                    set_reconstruction_in_progress
+                );
+            },
+        }
+    };
+    
     let reconstruct_img_and_set_reconstructed_img = move |_| {
         if zero_filled_recon_enabled.get() {
-            read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_zero_filled, ReconMode::ZeroFilled, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+            debounced_reconstruct(ReconMode::ZeroFilled);
         }
         if compressed_sensing_recon_enabled.get() {
-            read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_compressed_sensing, ReconMode::TGV2, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+            debounced_reconstruct(ReconMode::TGV2);
         }
-
     };
 
 
@@ -244,10 +292,10 @@ fn App() -> impl IntoView {
             let recon_interactivity_mode: ReconInteractivityMode = recon_interactivity_mode.get_untracked();
             if recon_interactivity_mode == ReconInteractivityMode::OnDraw {
                 if zero_filled_recon_enabled.get() {
-                    read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_zero_filled, ReconMode::ZeroFilled, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                    debounced_reconstruct(ReconMode::ZeroFilled);
                 }
                 if compressed_sensing_recon_enabled.get() {
-                    read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_compressed_sensing, ReconMode::TGV2, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                    debounced_reconstruct(ReconMode::TGV2);
                 }
             }
         })
@@ -260,10 +308,10 @@ fn App() -> impl IntoView {
 
             if recon_interactivity_mode.get() == ReconInteractivityMode::OnMouseUp {
                 if zero_filled_recon_enabled.get() {
-                    read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_zero_filled, ReconMode::ZeroFilled, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                    debounced_reconstruct(ReconMode::ZeroFilled);
                 }
                 if compressed_sensing_recon_enabled.get() {
-                    read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_compressed_sensing, ReconMode::TGV2, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                    debounced_reconstruct(ReconMode::TGV2);
                 }
             }
 
@@ -299,10 +347,10 @@ fn App() -> impl IntoView {
 
             if recon_interactivity_mode.get() == ReconInteractivityMode::OnDraw {
                 if zero_filled_recon_enabled.get() {
-                    read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_zero_filled, ReconMode::ZeroFilled, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                    debounced_reconstruct(ReconMode::ZeroFilled);
                 }
                 if compressed_sensing_recon_enabled.get() {
-                    read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_compressed_sensing, ReconMode::TGV2, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                    debounced_reconstruct(ReconMode::TGV2);
                 }
             }
         })
@@ -442,7 +490,7 @@ fn App() -> impl IntoView {
                                       .parse::<f32>()
                                       .unwrap_or(tgv2_lam.get());
                             set_tgv2_lam.set(v);
-                            read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_compressed_sensing, ReconMode::TGV2, ReconParams { tgv2_lam: v, tgv2_iter: tgv2_iter.get() });
+                            debounced_reconstruct(ReconMode::TGV2);
                           }
                         />
                         // Number input: shows same param but in linear scale
@@ -459,7 +507,7 @@ fn App() -> impl IntoView {
                                       .map(|x| x.log10())
                                       .unwrap_or(tgv2_lam.get());  // Int inputted, store it as log scale
                             set_tgv2_lam.set(v);
-                            read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_compressed_sensing, ReconMode::TGV2, ReconParams { tgv2_lam: v, tgv2_iter: tgv2_iter.get() });
+                            debounced_reconstruct(ReconMode::TGV2);
                           }
                           style="width: 4em;"
                         />
@@ -514,7 +562,7 @@ fn App() -> impl IntoView {
                 on:change=move |evt| {
                     set_zero_filled_recon_enabled.set(event_target_checked(&evt));
                     if zero_filled_recon_enabled.get() {
-                        read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_zero_filled, ReconMode::ZeroFilled, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                        debounced_reconstruct(ReconMode::ZeroFilled);
                     }
                 }
                 checked=move || zero_filled_recon_enabled.get() />
@@ -523,7 +571,7 @@ fn App() -> impl IntoView {
                 on:change=move |evt| {
                     set_compressed_sensing_recon_enabled.set(event_target_checked(&evt));
                     if compressed_sensing_recon_enabled.get() {
-                        read_canvas_and_reconstruct(canvas_ref, img_fft_vec, img_width, img_height, set_reconstructed_img_compressed_sensing, ReconMode::TGV2, ReconParams { tgv2_lam: tgv2_lam.get(), tgv2_iter: tgv2_iter.get() });
+                        debounced_reconstruct(ReconMode::TGV2);
                     }
                 }
                 checked=move || compressed_sensing_recon_enabled.get() />
@@ -595,75 +643,130 @@ fn read_canvas_and_reconstruct(
     set_reconstructed_img: WriteSignal<String>,
     recon_mode: ReconMode,
     recon_params: ReconParams,
+    set_reconstruction_in_progress: WriteSignal<bool>,
 ) {
     spawn_local(async move {
-        // Get sampling mask from canvas
+        let width = img_width.get() as usize;
+        let height = img_height.get() as usize;
+        let fft_vec = img_fft_vec.get();
         
-    let canvas = canvas_ref
-    .get()
-    .expect("canvas should be in the DOM");
-    let image_string = canvas.to_data_url_with_type("image/png").expect("Failed to convert canvas to image");
-    // log!("image_string: {:?}", image_string);
-    // let image = image::load_from_memory(&image_string.as_bytes()).expect("Failed to load image");
-    let image = convert_data_url_to_image(&image_string).expect("Failed to convert data URL to image");
-    let image_array: GrayImage = image.into_luma8();
-    let mask = image_array.as_ndarray2();
-    let mask = mask.map(|x| *x as f64);
-    let mask = mask.map(|x| if *x > 128.0 { 1.0 } else { 0.0 });
-    
-    let fft_vec = img_fft_vec.get();
-    let width = img_width.get() as usize;
-    let height = img_height.get() as usize;
-    
-    // Add logging to diagnose size issues
-    leptos::logging::log!("DEBUG: Attempting to reconstruct array with dimensions {}x{} (total expected elements: {})", height, width, height * width);
-    leptos::logging::log!("DEBUG: FFT vector has {} elements", fft_vec.len());
-    
-    if fft_vec.len() != height * width {
-        leptos::logging::log!("ERROR: Size mismatch! Expected {} elements, got {}", height * width, fft_vec.len());
-        return;
-    }
-    
-    let fft_img = Array2::from_shape_vec((height, width), fft_vec).unwrap();
-    
-    let mut masked_fft_img = Array2::<Complex<f64>>::zeros((height, width));
-    for i in 0..height {
-        for j in 0..width {
-            if mask[[i, j]] == 1.0 {
-                masked_fft_img[[i, j]] = fft_img[[i, j]];
+        // Early guard: Don't proceed if no valid image data is available
+        if fft_vec.is_empty() {
+            leptos::logging::log!("DEBUG: No image data available, skipping reconstruction");
+            set_reconstruction_in_progress.set(false);
+            return;
+        }
+        
+        if fft_vec.len() != height * width {
+            leptos::logging::log!("ERROR: Size mismatch! Expected {} elements, got {}. Skipping reconstruction.", height * width, fft_vec.len());
+            set_reconstruction_in_progress.set(false);
+            return;
+        }
+        
+        // Check available memory before proceeding with large allocations
+        leptos::logging::log!("DEBUG: Starting reconstruction for {}x{} image ({} MB estimated)", 
+            height, width, (height * width * 32) / (1024 * 1024)); // rough estimate
+        
+        // Get sampling mask from canvas using ImageData instead of PNG conversion
+        let canvas = canvas_ref
+            .get()
+            .expect("canvas should be in the DOM");
+        
+        let ctx = canvas
+            .get_context("2d")
+            .unwrap()
+            .unwrap()
+            .dyn_into::<CanvasRenderingContext2d>()
+            .unwrap();
+        
+        // Get ImageData directly from canvas instead of PNG conversion
+        let image_data = ctx
+            .get_image_data(0.0, 0.0, width as f64, height as f64)
+            .expect("Failed to get image data from canvas");
+        
+        let data = image_data.data();
+        
+        // Create FFT image array first (reuse the existing vector to avoid extra allocation)
+        let fft_img = match Array2::from_shape_vec((height, width), fft_vec) {
+            Ok(arr) => arr,
+            Err(e) => {
+                leptos::logging::log!("ERROR: Failed to create FFT array: {:?}", e);
+                set_reconstruction_in_progress.set(false);
+                return;
+            }
+        };
+        
+        // Create masked FFT image and apply mask directly without intermediate mask array
+        let mut masked_fft_img = Array2::<Complex<f64>>::zeros((height, width));
+        
+        for i in 0..height {
+            for j in 0..width {
+                let pixel_index = (i * width + j) * 4; // RGBA format
+                let r = data[pixel_index] as f64;
+                let g = data[pixel_index + 1] as f64; 
+                let b = data[pixel_index + 2] as f64;
+                // Average RGB values and threshold
+                let brightness = (r + g + b) / 3.0;
+                
+                if brightness > 128.0 {
+                    masked_fft_img[[i, j]] = fft_img[[i, j]];
+                }
+                // else leave as zero (already initialized)
             }
         }
-    }
+        
+        leptos::logging::log!("DEBUG: Created masked FFT array, starting reconstruction");
 
-    let reconstructed_img = match recon_mode {
-        ReconMode::ZeroFilled => {
-            // Use GPU-accelerated IFFT with fallback
-            let shifted = fft::ifft2shift(&masked_fft_img.view());
-            let ifft_result = fft::ifft2_auto(&shifted.view()).await;
-            ifft_result.map(|x| x.re as f32)
-        },
-        ReconMode::TGV2 => {
-            // Use GPU-accelerated TGV with fallback
-            tgv::tgv_mri_reconstruction_auto(
-                &masked_fft_img.view(), 
-                &mask.map(|x| *x as f32).view(), 
-                recon_params.tgv2_lam, 
-                1.0, 
-                2.0, 
-                1.0/(12.0_f32).sqrt(), 
-                1.0/(12.0_f32).sqrt(), 
-                recon_params.tgv2_iter as usize
-            ).await
-        },
-    };
-    let reconstructed_img = normalize_image_by_min_max(reconstructed_img);
-    
-    let reconstructed_img = GrayImage::from_raw(width as u32, height as u32, reconstructed_img.into_iter().collect()).unwrap();
-    let mut reconstructed_buffer = Vec::new();
-    reconstructed_img.write_to(&mut Cursor::new(&mut reconstructed_buffer), ImageFormat::Png)
-        .map_err(|e| format!("Failed to encode reconstructed image: {:?}", e)).expect("Failed to encode reconstructed image");
-    let reconstructed_base64 = general_purpose::STANDARD.encode(&reconstructed_buffer);
+        let reconstructed_img = match recon_mode {
+            ReconMode::ZeroFilled => {
+                // Use GPU-accelerated IFFT with fallback
+                let shifted = fft::ifft2shift(&masked_fft_img.view());
+                let ifft_result = fft::ifft2_auto(&shifted.view()).await;
+                ifft_result.map(|x| x.re as f32)
+            },
+            ReconMode::TGV2 => {
+                // For TGV, create a minimal mask array only when needed
+                let mut mask = Array2::<f32>::zeros((height, width));
+                for i in 0..height {
+                    for j in 0..width {
+                        let pixel_index = (i * width + j) * 4;
+                        let r = data[pixel_index] as f64;
+                        let g = data[pixel_index + 1] as f64; 
+                        let b = data[pixel_index + 2] as f64;
+                        let brightness = (r + g + b) / 3.0;
+                        mask[[i, j]] = if brightness > 128.0 { 1.0 } else { 0.0 };
+                    }
+                }
+                
+                // Use GPU-accelerated TGV with fallback
+                tgv::tgv_mri_reconstruction_auto(
+                    &masked_fft_img.view(), 
+                    &mask.view(), 
+                    recon_params.tgv2_lam, 
+                    1.0, 
+                    2.0, 
+                    1.0/(12.0_f32).sqrt(), 
+                    1.0/(12.0_f32).sqrt(), 
+                    recon_params.tgv2_iter as usize
+                ).await
+            },
+        };
+        
+        leptos::logging::log!("DEBUG: Reconstruction complete, normalizing image");
+        
+        let reconstructed_img = normalize_image_by_min_max(reconstructed_img);
+        
+        let reconstructed_img = GrayImage::from_raw(width as u32, height as u32, reconstructed_img.into_iter().collect()).unwrap();
+        let mut reconstructed_buffer = Vec::new();
+        reconstructed_img.write_to(&mut Cursor::new(&mut reconstructed_buffer), ImageFormat::Png)
+            .map_err(|e| format!("Failed to encode reconstructed image: {:?}", e)).expect("Failed to encode reconstructed image");
+        let reconstructed_base64 = general_purpose::STANDARD.encode(&reconstructed_buffer);
         set_reconstructed_img.set(format!("data:image/png;base64,{}", reconstructed_base64));
+        
+        leptos::logging::log!("DEBUG: Reconstruction and encoding complete");
+        
+        // Clear the in-progress flag
+        set_reconstruction_in_progress.set(false);
     })
 }
 
