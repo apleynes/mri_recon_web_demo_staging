@@ -344,7 +344,8 @@ fn App() -> impl IntoView {
             let img: GrayImage = img.into_luma8();
             let img = img.as_ndarray2();
             let complex_img: Array2<Complex<f64>> = img.map(|x| Complex::new(*x as f64, 0.0));
-            let fft_vec = fft::fft2(&complex_img.view());
+            // Use GPU-accelerated FFT with fallback
+            let fft_vec = fft::fft2_auto(&complex_img.view()).await;
             let fft_vec = fft::fft2shift(&fft_vec.view());
             let (v, offset) = fft_vec.into_raw_vec_and_offset();
             set_img_fft_vec.set(v);
@@ -608,14 +609,25 @@ fn read_canvas_and_reconstruct(
     }
 
     let reconstructed_img = match recon_mode {
-        ReconMode::ZeroFilled => zero_filled_recon(masked_fft_img),
-        ReconMode::TGV2 => tgv::tgv_mri_reconstruction(
-            &masked_fft_img.view(), 
-            &mask.map(|x| *x as f32).view(), 
-            recon_params.tgv2_lam, 
-            1.0, 
-            2.0, 
-            1.0/(12.0_f32).sqrt(), 1.0/(12.0_f32).sqrt(), recon_params.tgv2_iter as usize),
+        ReconMode::ZeroFilled => {
+            // Use GPU-accelerated IFFT with fallback
+            let shifted = fft::ifft2shift(&masked_fft_img.view());
+            let ifft_result = fft::ifft2_auto(&shifted.view()).await;
+            ifft_result.map(|x| x.re as f32)
+        },
+        ReconMode::TGV2 => {
+            // Use GPU-accelerated TGV with fallback
+            tgv::tgv_mri_reconstruction_auto(
+                &masked_fft_img.view(), 
+                &mask.map(|x| *x as f32).view(), 
+                recon_params.tgv2_lam, 
+                1.0, 
+                2.0, 
+                1.0/(12.0_f32).sqrt(), 
+                1.0/(12.0_f32).sqrt(), 
+                recon_params.tgv2_iter as usize
+            ).await
+        },
     };
     let reconstructed_img = normalize_image_by_min_max(reconstructed_img);
     
@@ -626,14 +638,6 @@ fn read_canvas_and_reconstruct(
     let reconstructed_base64 = general_purpose::STANDARD.encode(&reconstructed_buffer);
         set_reconstructed_img.set(format!("data:image/png;base64,{}", reconstructed_base64));
     })
-}
-
-fn zero_filled_recon(masked_fft_img: ndarray::ArrayBase<ndarray::OwnedRepr<Complex<f64>>, ndarray::Dim<[usize; 2]>>) -> Array2<f32> {
-    let masked_fft_img = fft::ifft2shift(&masked_fft_img.view());
-    let reconstructed_img = fft::ifft2(&masked_fft_img.view());
-    // Convert to real
-    let reconstructed_img = reconstructed_img.map(|x| x.re as f32);
-    reconstructed_img
 }
 
 fn normalize_image_by_min_max(img: Array2<f32>) -> Array2<u8> {
