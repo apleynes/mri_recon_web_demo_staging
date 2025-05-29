@@ -2,3 +2,5 @@
 /dist
 target/
 dist/
+.env
+.vercel
