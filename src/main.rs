@@ -186,8 +186,9 @@ fn App() -> impl IntoView {
     let (reconstructed_img_zero_filled, set_reconstructed_img_zero_filled) = signal(String::new());
     let (reconstructed_img_compressed_sensing, set_reconstructed_img_compressed_sensing) = signal(String::new());
 
-    // Add reconstruction in progress flag to prevent overlapping calls
-    let (reconstruction_in_progress, set_reconstruction_in_progress) = signal(false);
+    // Add separate reconstruction in progress flags for each mode
+    let (zero_filled_reconstruction_in_progress, set_zero_filled_reconstruction_in_progress) = signal(false);
+    let (tgv_reconstruction_in_progress, set_tgv_reconstruction_in_progress) = signal(false);
     
     let file_input: NodeRef<Input> = NodeRef::new();
     let (original_img_src, set_original_img_src) = signal(String::new());
@@ -201,26 +202,24 @@ fn App() -> impl IntoView {
     let (tgv2_lam, set_tgv2_lam) = signal(1.0);
     let (tgv2_iter, set_tgv2_iter) = signal(5 as usize);
     
-    // Debounced reconstruction function to prevent excessive calls
+    // Refactored debounced reconstruction function to handle each mode separately
     let debounced_reconstruct = move |mode: ReconMode| {
-        // Skip if reconstruction is already in progress
-        if reconstruction_in_progress.get_untracked() {
-            leptos::logging::log!("DEBUG: Reconstruction already in progress, skipping");
-            return;
-        }
-        
-        set_reconstruction_in_progress.set(true);
-        
         let canvas_ref = canvas_ref;
         let img_fft_vec = img_fft_vec;
         let img_width = img_width;
         let img_height = img_height;
-        let set_reconstruction_in_progress = set_reconstruction_in_progress;
         let tgv2_lam = tgv2_lam.get_untracked();
         let tgv2_iter = tgv2_iter.get_untracked();
         
         match mode {
             ReconMode::ZeroFilled => {
+                // Skip if zero-filled reconstruction is already in progress
+                if zero_filled_reconstruction_in_progress.get_untracked() {
+                    leptos::logging::log!("DEBUG: Zero-filled reconstruction already in progress, skipping");
+                    return;
+                }
+                
+                set_zero_filled_reconstruction_in_progress.set(true);
                 read_canvas_and_reconstruct(
                     canvas_ref, 
                     img_fft_vec, 
@@ -229,10 +228,17 @@ fn App() -> impl IntoView {
                     set_reconstructed_img_zero_filled, 
                     ReconMode::ZeroFilled, 
                     ReconParams { tgv2_lam, tgv2_iter },
-                    set_reconstruction_in_progress
+                    set_zero_filled_reconstruction_in_progress
                 );
             },
             ReconMode::TGV2 => {
+                // Skip if TGV reconstruction is already in progress
+                if tgv_reconstruction_in_progress.get_untracked() {
+                    leptos::logging::log!("DEBUG: TGV reconstruction already in progress, skipping");
+                    return;
+                }
+                
+                set_tgv_reconstruction_in_progress.set(true);
                 read_canvas_and_reconstruct(
                     canvas_ref, 
                     img_fft_vec, 
@@ -241,7 +247,7 @@ fn App() -> impl IntoView {
                     set_reconstructed_img_compressed_sensing, 
                     ReconMode::TGV2, 
                     ReconParams { tgv2_lam, tgv2_iter },
-                    set_reconstruction_in_progress
+                    set_tgv_reconstruction_in_progress
                 );
             },
         }
@@ -765,7 +771,7 @@ fn read_canvas_and_reconstruct(
         
         leptos::logging::log!("DEBUG: Reconstruction and encoding complete");
         
-        // Clear the in-progress flag
+        // Clear the specific mode's in-progress flag
         set_reconstruction_in_progress.set(false);
     })
 }
