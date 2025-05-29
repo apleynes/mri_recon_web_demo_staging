@@ -8,9 +8,18 @@ The demo is deployed on Github Pages at https://apleynes.github.io/mri_recon_web
 
 Roadmap:
 - [x] Zero-filled reconstruction
-- [ ] Compressed sensing reconstruction
-- [ ] Accelerate reconstruction with WebGPU and Web Workers
-- [ ] Add a "reconstruction options" section
+- [x] Compressed sensing reconstruction
+- [x] Accelerate reconstruction with WebGPU and Web Workers
+- [x] Add a "reconstruction options" section
+
+## Manual deployment to Vercel
+
+1. Install vercel CLI
+2. `vercel login`
+3. Set up vercel project
+4. Build with trunk locally: `trunk build --release`
+5. Build with vercel: `vercel build --prod`
+6. Deploy: `vercel deploy --prod --prebuilt`
 
 ## Local Usage
 
