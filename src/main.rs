@@ -344,10 +344,27 @@ fn App() -> impl IntoView {
             let img: GrayImage = img.into_luma8();
             let img = img.as_ndarray2();
             let complex_img: Array2<Complex<f64>> = img.map(|x| Complex::new(*x as f64, 0.0));
+            
+            // Add logging before FFT processing
+            leptos::logging::log!("DEBUG: Input image dimensions before FFT: {}x{} (total elements: {})", complex_img.nrows(), complex_img.ncols(), complex_img.len());
+            leptos::logging::log!("DEBUG: img_width signal: {}, img_height signal: {}", width, height);
+            
             // Use GPU-accelerated FFT with fallback
             let fft_vec = fft::fft2_auto(&complex_img.view()).await;
+            
+            // Add logging after FFT processing
+            leptos::logging::log!("DEBUG: FFT result dimensions: {}x{} (total elements: {})", fft_vec.nrows(), fft_vec.ncols(), fft_vec.len());
+            
             let fft_vec = fft::fft2shift(&fft_vec.view());
+            
+            // Add logging after shift
+            leptos::logging::log!("DEBUG: After fft2shift dimensions: {}x{} (total elements: {})", fft_vec.nrows(), fft_vec.ncols(), fft_vec.len());
+            
             let (v, offset) = fft_vec.into_raw_vec_and_offset();
+            
+            // Add logging for stored vector
+            leptos::logging::log!("DEBUG: Storing FFT vector with {} elements", v.len());
+            
             set_img_fft_vec.set(v);
 
             // Clear the canvas
@@ -597,6 +614,16 @@ fn read_canvas_and_reconstruct(
     let fft_vec = img_fft_vec.get();
     let width = img_width.get() as usize;
     let height = img_height.get() as usize;
+    
+    // Add logging to diagnose size issues
+    leptos::logging::log!("DEBUG: Attempting to reconstruct array with dimensions {}x{} (total expected elements: {})", height, width, height * width);
+    leptos::logging::log!("DEBUG: FFT vector has {} elements", fft_vec.len());
+    
+    if fft_vec.len() != height * width {
+        leptos::logging::log!("ERROR: Size mismatch! Expected {} elements, got {}", height * width, fft_vec.len());
+        return;
+    }
+    
     let fft_img = Array2::from_shape_vec((height, width), fft_vec).unwrap();
     
     let mut masked_fft_img = Array2::<Complex<f64>>::zeros((height, width));

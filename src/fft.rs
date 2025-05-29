@@ -340,12 +340,25 @@ async fn get_gpu_context() -> Result<&'static mut GpuFftContext, Box<dyn std::er
 // GPU implementations
 async fn fft2_gpu(gray_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Complex<f64>>, Box<dyn std::error::Error>> {
     let (ny, nx) = gray_img.dim();
-    let mut result = gray_img.to_owned();
+    
+    // Find next power-of-two sizes
+    let padded_ny = ny.next_power_of_two();
+    let padded_nx = nx.next_power_of_two();
+    
+    // Create padded array
+    let mut padded = Array2::<Complex<f64>>::zeros((padded_ny, padded_nx));
+    
+    // Copy original data to top-left corner
+    for i in 0..ny {
+        for j in 0..nx {
+            padded[[i, j]] = gray_img[[i, j]];
+        }
+    }
     
     let ctx = get_gpu_context().await?;
     
-    // Row-wise FFTs
-    for mut row in result.axis_iter_mut(Axis(0)) {
+    // Row-wise FFTs on padded data
+    for mut row in padded.axis_iter_mut(Axis(0)) {
         let mut row_data: Vec<Complex<f64>> = row.to_vec();
         ctx.fft_1d(&mut row_data, false).await?;
         for (i, &val) in row_data.iter().enumerate() {
@@ -353,12 +366,20 @@ async fn fft2_gpu(gray_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Comp
         }
     }
     
-    // Column-wise FFTs
-    for j in 0..nx {
-        let mut col_data: Vec<Complex<f64>> = result.column(j).to_vec();
+    // Column-wise FFTs on padded data
+    for j in 0..padded_nx {
+        let mut col_data: Vec<Complex<f64>> = padded.column(j).to_vec();
         ctx.fft_1d(&mut col_data, false).await?;
         for (i, &val) in col_data.iter().enumerate() {
-            result[[i, j]] = val;
+            padded[[i, j]] = val;
+        }
+    }
+    
+    // Extract result back to original size
+    let mut result = Array2::<Complex<f64>>::zeros((ny, nx));
+    for i in 0..ny {
+        for j in 0..nx {
+            result[[i, j]] = padded[[i, j]];
         }
     }
     
@@ -367,12 +388,25 @@ async fn fft2_gpu(gray_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Comp
 
 async fn ifft2_gpu(fft_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Complex<f64>>, Box<dyn std::error::Error>> {
     let (ny, nx) = fft_img.dim();
-    let mut result = fft_img.to_owned();
+    
+    // Find next power-of-two sizes
+    let padded_ny = ny.next_power_of_two();
+    let padded_nx = nx.next_power_of_two();
+    
+    // Create padded array
+    let mut padded = Array2::<Complex<f64>>::zeros((padded_ny, padded_nx));
+    
+    // Copy original data to top-left corner
+    for i in 0..ny {
+        for j in 0..nx {
+            padded[[i, j]] = fft_img[[i, j]];
+        }
+    }
     
     let ctx = get_gpu_context().await?;
     
-    // Row-wise IFFTs
-    for mut row in result.axis_iter_mut(Axis(0)) {
+    // Row-wise IFFTs on padded data
+    for mut row in padded.axis_iter_mut(Axis(0)) {
         let mut row_data: Vec<Complex<f64>> = row.to_vec();
         ctx.fft_1d(&mut row_data, true).await?;
         for (i, &val) in row_data.iter().enumerate() {
@@ -380,12 +414,23 @@ async fn ifft2_gpu(fft_img: &ArrayView2<'_, Complex<f64>>) -> Result<Array2<Comp
         }
     }
     
-    // Column-wise IFFTs
-    for j in 0..nx {
-        let mut col_data: Vec<Complex<f64>> = result.column(j).to_vec();
+    // Column-wise IFFTs on padded data
+    for j in 0..padded_nx {
+        let mut col_data: Vec<Complex<f64>> = padded.column(j).to_vec();
         ctx.fft_1d(&mut col_data, true).await?;
         for (i, &val) in col_data.iter().enumerate() {
-            result[[i, j]] = val;
+            padded[[i, j]] = val;
+        }
+    }
+    
+    // Extract result back to original size with proper normalization
+    let mut result = Array2::<Complex<f64>>::zeros((ny, nx));
+    // The normalization factor should account for the FFT size, not the crop
+    let normalization = (padded_ny * padded_nx) as f64;
+    
+    for i in 0..ny {
+        for j in 0..nx {
+            result[[i, j]] = padded[[i, j]] / normalization;
         }
     }
     
@@ -417,41 +462,45 @@ pub fn ifft2(fft_img: &ArrayView2<Complex<f64>>) -> Array2<Complex<f64>> {
 pub async fn fft2_auto(gray_img: &ArrayView2<'_, Complex<f64>>) -> Array2<Complex<f64>> {
     let (ny, nx) = gray_img.dim();
     
-    // Try GPU FFT for power-of-two sizes
-    if ny.is_power_of_two() && nx.is_power_of_two() {
-        match fft2_gpu(gray_img).await {
-            Ok(result) => {
-                leptos::logging::log!("Using GPU FFT (power-of-two size: {}x{})", ny, nx);
-                return result;
-            },
-            Err(e) => {
-                leptos::logging::log!("GPU FFT failed ({}), falling back to CPU", e);
-            }
+    leptos::logging::log!("DEBUG: fft2_auto called with input dimensions: {}x{}", ny, nx);
+    
+    // Try GPU FFT first (now supports arbitrary sizes via padding)
+    match fft2_gpu(gray_img).await {
+        Ok(result) => {
+            leptos::logging::log!("Using GPU FFT (size: {}x{}, padded to {}x{}) - result size: {}x{}", ny, nx, ny.next_power_of_two(), nx.next_power_of_two(), result.nrows(), result.ncols());
+            return result;
+        },
+        Err(e) => {
+            leptos::logging::log!("GPU FFT failed ({}), falling back to CPU", e);
         }
     }
     
     leptos::logging::log!("Using CPU FFT (size: {}x{})", ny, nx);
-    fft2(gray_img)
+    let result = fft2(gray_img);
+    leptos::logging::log!("DEBUG: CPU FFT result dimensions: {}x{}", result.nrows(), result.ncols());
+    result
 }
 
 pub async fn ifft2_auto(fft_img: &ArrayView2<'_, Complex<f64>>) -> Array2<Complex<f64>> {
     let (ny, nx) = fft_img.dim();
     
-    // Try GPU IFFT for power-of-two sizes
-    if ny.is_power_of_two() && nx.is_power_of_two() {
-        match ifft2_gpu(fft_img).await {
-            Ok(result) => {
-                leptos::logging::log!("Using GPU IFFT (power-of-two size: {}x{})", ny, nx);
-                return result;
-            },
-            Err(e) => {
-                leptos::logging::log!("GPU IFFT failed ({}), falling back to CPU", e);
-            }
+    leptos::logging::log!("DEBUG: ifft2_auto called with input dimensions: {}x{}", ny, nx);
+    
+    // Try GPU IFFT first (now supports arbitrary sizes via padding)
+    match ifft2_gpu(fft_img).await {
+        Ok(result) => {
+            leptos::logging::log!("Using GPU IFFT (size: {}x{}, padded to {}x{}) - result size: {}x{}", ny, nx, ny.next_power_of_two(), nx.next_power_of_two(), result.nrows(), result.ncols());
+            return result;
+        },
+        Err(e) => {
+            leptos::logging::log!("GPU IFFT failed ({}), falling back to CPU", e);
         }
     }
     
     leptos::logging::log!("Using CPU IFFT (size: {}x{})", ny, nx);
-    ifft2(fft_img)
+    let result = ifft2(fft_img);
+    leptos::logging::log!("DEBUG: CPU IFFT result dimensions: {}x{}", result.nrows(), result.ncols());
+    result
 }
 
 pub fn fft2shift(img: &ArrayView2<Complex<f64>>) -> Array2<Complex<f64>> {
