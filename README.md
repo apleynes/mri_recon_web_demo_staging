@@ -4,7 +4,7 @@ This is a web demo for sampling and reconstruction of MRI images written in Rust
 
 Requires the latest trunk version: `>=v0.21.14` as this bundles an updated `wasm-opt` package that resolves wasm parsing errors.
 
-The demo is deployed on Github Pages at https://apleynes.github.io/mri_recon_web_demo
+The demo is deployed on Vercel at: https://mri-recon-web-demo-staging.vercel.app/
 
 Roadmap:
 - [x] Zero-filled reconstruction
