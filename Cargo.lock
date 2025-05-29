@@ -1172,7 +1172,6 @@ dependencies = [
  "ndrustfft",
  "nshare",
  "num-complex",
- "num_cpus",
  "rayon",
  "wasm-bindgen",
  "wasm-bindgen-futures",

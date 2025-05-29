@@ -5,7 +5,7 @@
         <link rel="icon" href="data:," />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>MRI Sampling and Reconstruction Web Demo</title>
-        <meta http-equiv="Content-Security-Policy" content="worker-src 'self' blob:; script-src 'unsafe-inline' 'unsafe-eval' 'self' blob:;" />"
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline' 'unsafe-eval' 'self' blob: data:; style-src 'unsafe-inline' 'self'; worker-src 'self' blob: data:; object-src 'none'; img-src 'self' data: blob:;" />
         <base data-trunk-public-url />
     </head>
     <body>
@@ -13,7 +13,7 @@
             data-trunk
             rel="rust"
             href="Cargo.toml"
-            data-wasm-opt="4"
+            data-wasm-opt="0"
             data-bindgen-target="web"
         />
         <link data-trunk rel="copy-file" href="assets/_headers" />

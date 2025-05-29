@@ -1,10 +1,25 @@
 [build]
 pattern_script = '''
-<script type="module">import init, { initThreadPool} from '{base}{js}';await init('{base}{wasm}'); await initThreadPool(navigator.hardwareConcurrency);</script>
+<script type="module">
+import init, { initThreadPool} from '{base}{js}';
+await init('{base}{wasm}');
+
+// Check if SharedArrayBuffer is available (required for multi-threading)
+if (typeof SharedArrayBuffer !== 'undefined' && crossOriginIsolated) {
+    try {
+        await initThreadPool(navigator.hardwareConcurrency);
+        console.log('Multi-threading enabled');
+    } catch (e) {
+        console.warn('Failed to initialize thread pool, falling back to single-threaded mode:', e);
+    }
+} else {
+    console.log('SharedArrayBuffer not available (likely due to missing CORS headers). Running in single-threaded mode.');
+}
+</script>
 '''
 [serve.headers]
 # see ./assets/_headers for more documentation
 "cross-origin-embedder-policy"= "require-corp"
 "cross-origin-opener-policy"= "same-origin"
 "cross-origin-resource-policy"= "same-site"
-"content-security-policy"="worker-src 'self' blob:; script-src 'unsafe-inline' 'unsafe-eval' 'self' blob:;"
+"content-security-policy"="default-src 'self'; script-src 'unsafe-inline' 'unsafe-eval' 'self' blob: data:; style-src 'unsafe-inline' 'self'; worker-src 'self' blob: data:; object-src 'none'; img-src 'self' data: blob:;"
