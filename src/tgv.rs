@@ -118,7 +118,7 @@ impl GpuTgvContext {
                 let next_x_idx = idx.y * width + next_x;
                 let next_y_idx = next_y * width + idx.x;
                 
-                // Gradient calculation: finite differences
+                // Gradient calculation: finite differences with periodic boundaries
                 let grad_x = input_data[next_x_idx] - input_data[linear_idx];
                 let grad_y = input_data[next_y_idx] - input_data[linear_idx];
                 
@@ -156,12 +156,12 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
-                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
-                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
+                let prev_x = (idx.x + width - 1u) % width;
+                let prev_y = (idx.y + height - 1u) % height;
                 let prev_x_idx = idx.y * width + prev_x;
                 let prev_y_idx = prev_y * width + idx.x;
                 
-                // Divergence calculation: negative of finite differences
+                // Divergence calculation: negative of finite differences with periodic boundaries
                 let div_x = input_data[linear_idx * 2u] - input_data[prev_x_idx * 2u];
                 let div_y = input_data[linear_idx * 2u + 1u] - input_data[prev_y_idx * 2u + 1u];
                 
@@ -250,8 +250,8 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
-                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
-                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
+                let prev_x = (idx.x + width - 1u) % width;
+                let prev_y = (idx.y + height - 1u) % height;
                 let prev_x_idx = idx.y * width + prev_x;
                 let prev_y_idx = prev_y * width + idx.x;
                 
@@ -264,7 +264,7 @@ impl GpuTgvContext {
                 let q2_prev_x = input_data[prev_x_idx * 3u + 2u];
                 let q2_prev_y = input_data[prev_y_idx * 3u + 2u];
                 
-                // Symmetric divergence calculation
+                // Symmetric divergence calculation with periodic boundaries
                 let div_x = -(q0_curr - q0_prev_x) - 0.5 * (q2_curr - q2_prev_y);
                 let div_y = -(q1_curr - q1_prev_y) - 0.5 * (q2_curr - q2_prev_x);
                 
@@ -454,14 +454,15 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
-                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
-                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
+                let prev_x = (idx.x + width - 1u) % width;
+                let prev_y = (idx.y + height - 1u) % height;
                 let prev_x_idx = idx.y * width + prev_x;
                 let prev_y_idx = prev_y * width + idx.x;
                 
-                // Divergence of p
-                let div_p = -(p_data[linear_idx * 2u] - p_data[prev_x_idx * 2u] + 
-                              p_data[linear_idx * 2u + 1u] - p_data[prev_y_idx * 2u + 1u]);
+                // Divergence of p with periodic boundaries - match standalone divergence shader exactly
+                let div_x = p_data[linear_idx * 2u] - p_data[prev_x_idx * 2u];
+                let div_y = p_data[linear_idx * 2u + 1u] - p_data[prev_y_idx * 2u + 1u];
+                let div_p = -(div_x + div_y);
                 
                 // Update u
                 u_data[linear_idx] -= params.tau * (params.lambda * div_p + fft_residual[linear_idx]);
