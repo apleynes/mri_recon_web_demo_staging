@@ -122,19 +122,20 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
                 
-                // Gradient x: forward difference with periodic boundary (same as CPU)
-                let next_x = (idx.x + 1u) % width;
+                // Gradient x with proper periodic boundary handling
+                let next_x = select(0u, idx.x + 1u, idx.x < (width - 1u));
                 let next_x_idx = idx.y * width + next_x;
                 let grad_x = input_data[next_x_idx] - input_data[linear_idx];
                 
-                // Gradient y: forward difference with periodic boundary (same as CPU) 
-                let next_y = (idx.y + 1u) % height;
+                // Gradient y with proper periodic boundary handling
+                let next_y = select(0u, idx.y + 1u, idx.y < (height - 1u));
                 let next_y_idx = next_y * width + idx.x;
                 let grad_y = input_data[next_y_idx] - input_data[linear_idx];
                 
@@ -167,19 +168,20 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
                 
-                // Divergence x: backward difference with periodic boundary (same as CPU)
-                let prev_x = (idx.x + width - 1u) % width;
+                // Divergence x with proper periodic boundary handling
+                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
                 let prev_x_idx = idx.y * width + prev_x;
                 let div_x = input_data[linear_idx * 2u] - input_data[prev_x_idx * 2u];
                 
-                // Divergence y: backward difference with periodic boundary (same as CPU)
-                let prev_y = (idx.y + height - 1u) % height;
+                // Divergence y with proper periodic boundary handling
+                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
                 let prev_y_idx = prev_y * width + idx.x;
                 let div_y = input_data[linear_idx * 2u + 1u] - input_data[prev_y_idx * 2u + 1u];
                 
@@ -210,6 +212,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -220,19 +223,19 @@ impl GpuTgvContext {
                 let w0_curr = input_data[linear_idx * 2u];
                 let w1_curr = input_data[linear_idx * 2u + 1u];
                 
-                // First diagonal: ∂x w_0 (forward difference)
-                let next_x = (idx.x + 1u) % width;
+                // First diagonal: ∂x w_0 with proper periodic boundary handling
+                let next_x = select(0u, idx.x + 1u, idx.x < (width - 1u));
                 let next_x_idx = idx.y * width + next_x;
                 let w0_next_x = input_data[next_x_idx * 2u];
                 let grad_xx = w0_next_x - w0_curr;
                 
-                // Second diagonal: ∂y w_1 (forward difference)
-                let next_y = (idx.y + 1u) % height;
+                // Second diagonal: ∂y w_1 with proper periodic boundary handling
+                let next_y = select(0u, idx.y + 1u, idx.y < (height - 1u));
                 let next_y_idx = next_y * width + idx.x;
                 let w1_next_y = input_data[next_y_idx * 2u + 1u];
                 let grad_yy = w1_next_y - w1_curr;
                 
-                // Off-diagonals: 0.5*(∂y w_0 + ∂x w_1)
+                // Off-diagonals: 0.5*(∂y w_0 + ∂x w_1) with proper boundary handling
                 let w0_next_y = input_data[next_y_idx * 2u];
                 let w1_next_x = input_data[next_x_idx * 2u + 1u];
                 let grad_xy = 0.5 * ((w0_next_y - w0_curr) + (w1_next_x - w1_curr));
@@ -267,6 +270,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -278,19 +282,19 @@ impl GpuTgvContext {
                 let q1_curr = input_data[linear_idx * 3u + 1u]; // q_yy  
                 let q2_curr = input_data[linear_idx * 3u + 2u]; // q_xy
                 
-                // First component: -∂x q_0 - 0.5*∂y q_2 (backward differences)
-                let prev_x = (idx.x + width - 1u) % width;
+                // First component: -∂x q_0 - 0.5*∂y q_2 with proper boundary handling
+                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
                 let prev_x_idx = idx.y * width + prev_x;
                 let q0_prev_x = input_data[prev_x_idx * 3u];
                 let q2_prev_x = input_data[prev_x_idx * 3u + 2u];
                 
-                let prev_y = (idx.y + height - 1u) % height;
+                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
                 let prev_y_idx = prev_y * width + idx.x;
                 let q2_prev_y = input_data[prev_y_idx * 3u + 2u];
                 
                 let div_x = -(q0_curr - q0_prev_x) - 0.5 * (q2_curr - q2_prev_y);
                 
-                // Second component: -∂y q_1 - 0.5*∂x q_2 (backward differences)
+                // Second component: -∂y q_1 - 0.5*∂x q_2 with proper boundary handling
                 let q1_prev_y = input_data[prev_y_idx * 3u + 1u];
                 let div_y = -(q1_curr - q1_prev_y) - 0.5 * (q2_curr - q2_prev_x);
                 
@@ -324,6 +328,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -359,6 +364,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -395,6 +401,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -433,6 +440,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -475,15 +483,16 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
                 
-                // Divergence of p with periodic boundaries - matches CPU exactly
-                let prev_x = (idx.x + width - 1u) % width;
-                let prev_y = (idx.y + height - 1u) % height;
+                // Divergence of p with proper periodic boundary handling
+                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
+                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
                 let prev_x_idx = idx.y * width + prev_x;
                 let prev_y_idx = prev_y * width + idx.x;
                 
@@ -520,6 +529,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -552,6 +562,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -582,6 +593,7 @@ impl GpuTgvContext {
                 let width = params.width;
                 let height = params.height;
                 
+                // Strict bounds checking to prevent out-of-bounds access
                 if (idx.x >= width || idx.y >= height) {
                     return;
                 }
@@ -1088,7 +1100,7 @@ impl GpuTgvContext {
             mapped_at_creation: false,
         });
 
-        let u_staging_buffer = self.device.create_buffer(&BufferDescriptor {
+        let _u_staging_buffer = self.device.create_buffer(&BufferDescriptor {
             label: Some("U Staging Buffer"),
             size: (ny * nx * std::mem::size_of::<f32>()) as u64,
             usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
@@ -1101,8 +1113,9 @@ impl GpuTgvContext {
         let update_bind_group_layout = &self.update_u_pipeline.as_ref().unwrap().get_bind_group_layout(0);
         let update_q_bind_group_layout = &self.update_q_pipeline.as_ref().unwrap().get_bind_group_layout(0);
 
-        let workgroup_count_x = (nx + 15) / 16;
-        let workgroup_count_y = (ny + 15) / 16;
+        // Use floating point ceil to calculate workgroup counts
+        let workgroup_count_x = f32::ceil(nx as f32 / 16.0) as u32;
+        let workgroup_count_y = f32::ceil(ny as f32 / 16.0) as u32;
 
         // Initialize momentum variable
         let mut t: f32 = 1.0;
@@ -1110,14 +1123,6 @@ impl GpuTgvContext {
         // Main TGV iteration loop
         for iteration in 0..max_iter {
             log!("GPU TGV iteration {}/{}", iteration + 1, max_iter);
-            
-            // Save current values as old values for extrapolation (copy at start of iteration)
-            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Save Old Values"),
-            });
-            encoder.copy_buffer_to_buffer(&u_buffer, 0, &u_old_buffer, 0, u_buffer.size());
-            encoder.copy_buffer_to_buffer(&w_buffer, 0, &w_old_buffer, 0, w_buffer.size());
-            self.queue.submit(Some(encoder.finish()));
             
             let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("TGV Iteration"),
@@ -1248,7 +1253,23 @@ impl GpuTgvContext {
                 compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
             }
 
-            // 6. Compute divergence of p
+            // Submit dual updates
+            self.queue.submit(Some(encoder.finish()));
+
+            // *** CRITICAL FIX: Save old values AFTER dual updates but BEFORE primal updates ***
+            // This matches the CPU implementation exactly and is essential for correct convergence
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Save Old Values"),
+            });
+            encoder.copy_buffer_to_buffer(&u_buffer, 0, &u_old_buffer, 0, u_buffer.size());
+            encoder.copy_buffer_to_buffer(&w_buffer, 0, &w_old_buffer, 0, w_buffer.size());
+            self.queue.submit(Some(encoder.finish()));
+
+            // 6. Compute divergence of p for primal updates
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Primal Updates"),
+            });
+            
             {
                 let divergence_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
                     label: Some("Divergence Bind Group"),
@@ -1269,7 +1290,7 @@ impl GpuTgvContext {
                 compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
             }
 
-            // Submit GPU commands so far
+            // Submit divergence computation
             self.queue.submit(Some(encoder.finish()));
 
             // 7. Handle data fidelity term on CPU (FFT operations)
@@ -1383,13 +1404,13 @@ impl GpuTgvContext {
                 compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
             }
 
-            // Submit all updates
+            // Submit all primal updates
             self.queue.submit(Some(encoder.finish()));
 
-            // 11. Update u_bar and w_bar (proper extrapolation)
+            // 11. Update u_bar and w_bar (proper extrapolation with correct old values)
             let t_old = t;
             t = (1. + (1. + 4. * t_old.powi(2)).sqrt()) / 2.0;
-            let theta = (t_old - 1.) / t;
+            let theta = (1. - t_old) / t;
             
             // Create extrapolation parameter buffer
             let extrapolation_params = ExtrapolationParams {
