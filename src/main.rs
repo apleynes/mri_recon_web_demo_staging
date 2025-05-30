@@ -654,7 +654,7 @@ fn App() -> impl IntoView {
                     set_gpu_acceleration_enabled.set(event_target_checked(&evt));
                 }
                 checked=move || gpu_acceleration_enabled.get() />
-            <label for="gpu_acceleration_enabled">"GPU Acceleration (WebGPU) [Note: Firefox currently does not support WebGPU. Use Chromium-based browsers (like Chrome or Edge) or Safari.]"</label>
+            <label for="gpu_acceleration_enabled">"GPU Acceleration (WebGPU) [Note: Firefox currently does not support WebGPU and WebGPU is experimental on Safari. Use Chromium-based browsers (like Chrome or Edge)]"</label>
             <br />
             <button on:click=move |_| set_erase.set(false)>
                 "Draw"
