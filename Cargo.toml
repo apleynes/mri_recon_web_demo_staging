@@ -29,4 +29,5 @@ wgpu = { version = "24.0.5", features = ["webgpu", "wgsl"] }
 pollster = "0.4"
 bytemuck = { version = "1.19", features = ["derive"] }
 futures-channel = "0.3"
+num_cpus = "1.16.0"
 

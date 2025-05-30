@@ -1430,6 +1430,7 @@ dependencies = [
  "ndrustfft",
  "nshare",
  "num-complex",
+ "num_cpus",
  "pollster",
  "rayon",
  "wasm-bindgen",
