@@ -99,7 +99,7 @@ impl GpuTgvContext {
     }
 
     fn init_pipelines(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Gradient compute shader - matches CPU implementation exactly
+        // Gradient compute shader - FIXED: Proper boundary handling to prevent tiling artifacts
         let gradient_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -129,14 +129,24 @@ impl GpuTgvContext {
                 
                 let linear_idx = idx.y * width + idx.x;
                 
-                // Gradient x with proper periodic boundary handling
-                let next_x = select(0u, idx.x + 1u, idx.x < (width - 1u));
-                let next_x_idx = idx.y * width + next_x;
+                // FIXED: Gradient x with consistent periodic boundary handling
+                // Match CPU implementation exactly: if at last column, wrap to first column
+                var next_x_idx: u32;
+                if (idx.x == (width - 1u)) {
+                    next_x_idx = idx.y * width + 0u;  // Wrap to first column
+                } else {
+                    next_x_idx = idx.y * width + (idx.x + 1u);  // Next column
+                }
                 let grad_x = input_data[next_x_idx] - input_data[linear_idx];
                 
-                // Gradient y with proper periodic boundary handling
-                let next_y = select(0u, idx.y + 1u, idx.y < (height - 1u));
-                let next_y_idx = next_y * width + idx.x;
+                // FIXED: Gradient y with consistent periodic boundary handling  
+                // Match CPU implementation exactly: if at last row, wrap to first row
+                var next_y_idx: u32;
+                if (idx.y == (height - 1u)) {
+                    next_y_idx = 0u * width + idx.x;  // Wrap to first row
+                } else {
+                    next_y_idx = (idx.y + 1u) * width + idx.x;  // Next row
+                }
                 let grad_y = input_data[next_y_idx] - input_data[linear_idx];
                 
                 // Store gradients (output has 2 components per pixel)
@@ -145,7 +155,7 @@ impl GpuTgvContext {
             }
         "#;
 
-        // Divergence compute shader - matches CPU implementation exactly
+        // Divergence compute shader - FIXED: Proper boundary handling to prevent tiling artifacts
         let divergence_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -175,21 +185,31 @@ impl GpuTgvContext {
                 
                 let linear_idx = idx.y * width + idx.x;
                 
-                // Divergence x with proper periodic boundary handling
-                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
-                let prev_x_idx = idx.y * width + prev_x;
+                // FIXED: Divergence x with consistent periodic boundary handling
+                // Match CPU implementation exactly: if at first column, wrap to last column
+                var prev_x_idx: u32;
+                if (idx.x == 0u) {
+                    prev_x_idx = idx.y * width + (width - 1u);  // Wrap to last column
+                } else {
+                    prev_x_idx = idx.y * width + (idx.x - 1u);  // Previous column
+                }
                 let div_x = input_data[linear_idx * 2u] - input_data[prev_x_idx * 2u];
                 
-                // Divergence y with proper periodic boundary handling
-                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
-                let prev_y_idx = prev_y * width + idx.x;
+                // FIXED: Divergence y with consistent periodic boundary handling
+                // Match CPU implementation exactly: if at first row, wrap to last row
+                var prev_y_idx: u32;
+                if (idx.y == 0u) {
+                    prev_y_idx = (height - 1u) * width + idx.x;  // Wrap to last row
+                } else {
+                    prev_y_idx = (idx.y - 1u) * width + idx.x;  // Previous row
+                }
                 let div_y = input_data[linear_idx * 2u + 1u] - input_data[prev_y_idx * 2u + 1u];
                 
                 output_data[linear_idx] = -(div_x + div_y);
             }
         "#;
 
-        // Symmetric gradient compute shader - matches CPU implementation exactly
+        // Symmetric gradient compute shader - FIXED: Proper boundary handling to prevent tiling artifacts
         let sym_gradient_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -223,19 +243,27 @@ impl GpuTgvContext {
                 let w0_curr = input_data[linear_idx * 2u];
                 let w1_curr = input_data[linear_idx * 2u + 1u];
                 
-                // First diagonal: ∂x w_0 with proper periodic boundary handling
-                let next_x = select(0u, idx.x + 1u, idx.x < (width - 1u));
-                let next_x_idx = idx.y * width + next_x;
+                // FIXED: First diagonal: ∂x w_0 with consistent periodic boundary handling
+                var next_x_idx: u32;
+                if (idx.x == (width - 1u)) {
+                    next_x_idx = idx.y * width + 0u;  // Wrap to first column
+                } else {
+                    next_x_idx = idx.y * width + (idx.x + 1u);  // Next column
+                }
                 let w0_next_x = input_data[next_x_idx * 2u];
                 let grad_xx = w0_next_x - w0_curr;
                 
-                // Second diagonal: ∂y w_1 with proper periodic boundary handling
-                let next_y = select(0u, idx.y + 1u, idx.y < (height - 1u));
-                let next_y_idx = next_y * width + idx.x;
+                // FIXED: Second diagonal: ∂y w_1 with consistent periodic boundary handling
+                var next_y_idx: u32;
+                if (idx.y == (height - 1u)) {
+                    next_y_idx = 0u * width + idx.x;  // Wrap to first row
+                } else {
+                    next_y_idx = (idx.y + 1u) * width + idx.x;  // Next row
+                }
                 let w1_next_y = input_data[next_y_idx * 2u + 1u];
                 let grad_yy = w1_next_y - w1_curr;
                 
-                // Off-diagonals: 0.5*(∂y w_0 + ∂x w_1) with proper boundary handling
+                // FIXED: Off-diagonals: 0.5*(∂y w_0 + ∂x w_1) with consistent boundary handling
                 let w0_next_y = input_data[next_y_idx * 2u];
                 let w1_next_x = input_data[next_x_idx * 2u + 1u];
                 let grad_xy = 0.5 * ((w0_next_y - w0_curr) + (w1_next_x - w1_curr));
@@ -247,7 +275,7 @@ impl GpuTgvContext {
             }
         "#;
 
-        // Symmetric divergence compute shader - matches CPU implementation exactly
+        // Symmetric divergence compute shader - FIXED: Proper boundary handling to prevent tiling artifacts
         let sym_divergence_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -282,19 +310,27 @@ impl GpuTgvContext {
                 let q1_curr = input_data[linear_idx * 3u + 1u]; // q_yy  
                 let q2_curr = input_data[linear_idx * 3u + 2u]; // q_xy
                 
-                // First component: -∂x q_0 - 0.5*∂y q_2 with proper boundary handling
-                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
-                let prev_x_idx = idx.y * width + prev_x;
+                // FIXED: First component: -∂x q_0 - 0.5*∂y q_2 with consistent boundary handling
+                var prev_x_idx: u32;
+                if (idx.x == 0u) {
+                    prev_x_idx = idx.y * width + (width - 1u);  // Wrap to last column
+                } else {
+                    prev_x_idx = idx.y * width + (idx.x - 1u);  // Previous column
+                }
                 let q0_prev_x = input_data[prev_x_idx * 3u];
                 let q2_prev_x = input_data[prev_x_idx * 3u + 2u];
                 
-                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
-                let prev_y_idx = prev_y * width + idx.x;
+                var prev_y_idx: u32;
+                if (idx.y == 0u) {
+                    prev_y_idx = (height - 1u) * width + idx.x;  // Wrap to last row
+                } else {
+                    prev_y_idx = (idx.y - 1u) * width + idx.x;  // Previous row
+                }
                 let q2_prev_y = input_data[prev_y_idx * 3u + 2u];
                 
                 let div_x = -(q0_curr - q0_prev_x) - 0.5 * (q2_curr - q2_prev_y);
                 
-                // Second component: -∂y q_1 - 0.5*∂x q_2 with proper boundary handling
+                // FIXED: Second component: -∂y q_1 - 0.5*∂x q_2 with consistent boundary handling
                 let q1_prev_y = input_data[prev_y_idx * 3u + 1u];
                 let div_y = -(q1_curr - q1_prev_y) - 0.5 * (q2_curr - q2_prev_x);
                 
@@ -459,10 +495,10 @@ impl GpuTgvContext {
             }
         "#;
 
-        // Update shader for u (data fidelity + TGV term)
+        // Update shader for u (data fidelity + TGV term) - FIXED: Remove inline divergence calculation
         let update_u_shader_source = r#"
             @group(0) @binding(0) var<storage, read_write> u_data: array<f32>;
-            @group(0) @binding(1) var<storage, read> p_data: array<f32>;
+            @group(0) @binding(1) var<storage, read> div_p_data: array<f32>;
             @group(0) @binding(2) var<storage, read> fft_residual: array<f32>;
             @group(0) @binding(3) var<uniform> params: TgvParams;
 
@@ -490,17 +526,11 @@ impl GpuTgvContext {
                 
                 let linear_idx = idx.y * width + idx.x;
                 
-                // Divergence of p with proper periodic boundary handling
-                let prev_x = select(width - 1u, idx.x - 1u, idx.x > 0u);
-                let prev_y = select(height - 1u, idx.y - 1u, idx.y > 0u);
-                let prev_x_idx = idx.y * width + prev_x;
-                let prev_y_idx = prev_y * width + idx.x;
+                // FIXED: Use pre-computed divergence instead of calculating inline
+                // This prevents tiling artifacts from inconsistent boundary handling
+                let div_p = div_p_data[linear_idx];
                 
-                let div_x = p_data[linear_idx * 2u] - p_data[prev_x_idx * 2u];
-                let div_y = p_data[linear_idx * 2u + 1u] - p_data[prev_y_idx * 2u + 1u];
-                let div_p = -(div_x + div_y);
-                
-                // Update u
+                // Update u: u = u - tau * (lambda * div_p + fft_residual)
                 u_data[linear_idx] -= params.tau * (params.lambda * div_p + fft_residual[linear_idx]);
             }
         "#;
