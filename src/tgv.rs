@@ -24,6 +24,15 @@ struct TgvParams {
     _padding: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct ExtrapolationParams {
+    width: u32,
+    height: u32,
+    theta: f32,
+    _padding: u32,
+}
+
 pub struct GpuTgvContext {
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -37,6 +46,8 @@ pub struct GpuTgvContext {
     update_w_pipeline: Option<ComputePipeline>,
     update_p_pipeline: Option<ComputePipeline>,
     update_q_pipeline: Option<ComputePipeline>,
+    extrapolation_u_pipeline: Option<ComputePipeline>,
+    extrapolation_w_pipeline: Option<ComputePipeline>,
     bind_group_layout: Option<BindGroupLayout>,
 }
 
@@ -81,12 +92,14 @@ impl GpuTgvContext {
             update_w_pipeline: None,
             update_p_pipeline: None,
             update_q_pipeline: None,
+            extrapolation_u_pipeline: None,
+            extrapolation_w_pipeline: None,
             bind_group_layout: None,
         })
     }
 
     fn init_pipelines(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Gradient compute shader
+        // Gradient compute shader - matches CPU implementation exactly
         let gradient_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -114,13 +127,15 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
-                let next_x = (idx.x + 1u) % width;
-                let next_y = (idx.y + 1u) % height;
-                let next_x_idx = idx.y * width + next_x;
-                let next_y_idx = next_y * width + idx.x;
                 
-                // Gradient calculation: finite differences with periodic boundaries
+                // Gradient x: forward difference with periodic boundary (same as CPU)
+                let next_x = (idx.x + 1u) % width;
+                let next_x_idx = idx.y * width + next_x;
                 let grad_x = input_data[next_x_idx] - input_data[linear_idx];
+                
+                // Gradient y: forward difference with periodic boundary (same as CPU) 
+                let next_y = (idx.y + 1u) % height;
+                let next_y_idx = next_y * width + idx.x;
                 let grad_y = input_data[next_y_idx] - input_data[linear_idx];
                 
                 // Store gradients (output has 2 components per pixel)
@@ -129,7 +144,7 @@ impl GpuTgvContext {
             }
         "#;
 
-        // Divergence compute shader
+        // Divergence compute shader - matches CPU implementation exactly
         let divergence_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -157,20 +172,22 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
-                let prev_x = (idx.x + width - 1u) % width;
-                let prev_y = (idx.y + height - 1u) % height;
-                let prev_x_idx = idx.y * width + prev_x;
-                let prev_y_idx = prev_y * width + idx.x;
                 
-                // Divergence calculation: negative of finite differences with periodic boundaries
+                // Divergence x: backward difference with periodic boundary (same as CPU)
+                let prev_x = (idx.x + width - 1u) % width;
+                let prev_x_idx = idx.y * width + prev_x;
                 let div_x = input_data[linear_idx * 2u] - input_data[prev_x_idx * 2u];
+                
+                // Divergence y: backward difference with periodic boundary (same as CPU)
+                let prev_y = (idx.y + height - 1u) % height;
+                let prev_y_idx = prev_y * width + idx.x;
                 let div_y = input_data[linear_idx * 2u + 1u] - input_data[prev_y_idx * 2u + 1u];
                 
                 output_data[linear_idx] = -(div_x + div_y);
             }
         "#;
 
-        // Symmetric gradient compute shader
+        // Symmetric gradient compute shader - matches CPU implementation exactly
         let sym_gradient_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -198,23 +215,27 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
-                let next_x = (idx.x + 1u) % width;
-                let next_y = (idx.y + 1u) % height;
-                let next_x_idx = idx.y * width + next_x;
-                let next_y_idx = next_y * width + idx.x;
                 
                 // Input has 2 components per pixel (w vector field)
                 let w0_curr = input_data[linear_idx * 2u];
                 let w1_curr = input_data[linear_idx * 2u + 1u];
-                let w0_next_x = input_data[next_x_idx * 2u];
-                let w1_next_x = input_data[next_x_idx * 2u + 1u];
-                let w0_next_y = input_data[next_y_idx * 2u];
-                let w1_next_y = input_data[next_y_idx * 2u + 1u];
                 
-                // Symmetric gradient calculation
-                let grad_xx = w0_next_x - w0_curr;  // ∂x w_0
-                let grad_yy = w1_next_y - w1_curr;  // ∂y w_1
-                let grad_xy = 0.5 * ((w0_next_y - w0_curr) + (w1_next_x - w1_curr));  // 0.5*(∂y w_0 + ∂x w_1)
+                // First diagonal: ∂x w_0 (forward difference)
+                let next_x = (idx.x + 1u) % width;
+                let next_x_idx = idx.y * width + next_x;
+                let w0_next_x = input_data[next_x_idx * 2u];
+                let grad_xx = w0_next_x - w0_curr;
+                
+                // Second diagonal: ∂y w_1 (forward difference)
+                let next_y = (idx.y + 1u) % height;
+                let next_y_idx = next_y * width + idx.x;
+                let w1_next_y = input_data[next_y_idx * 2u + 1u];
+                let grad_yy = w1_next_y - w1_curr;
+                
+                // Off-diagonals: 0.5*(∂y w_0 + ∂x w_1)
+                let w0_next_y = input_data[next_y_idx * 2u];
+                let w1_next_x = input_data[next_x_idx * 2u + 1u];
+                let grad_xy = 0.5 * ((w0_next_y - w0_curr) + (w1_next_x - w1_curr));
                 
                 // Store symmetric gradient (output has 3 components per pixel)
                 output_data[linear_idx * 3u] = grad_xx;
@@ -223,7 +244,7 @@ impl GpuTgvContext {
             }
         "#;
 
-        // Symmetric divergence compute shader
+        // Symmetric divergence compute shader - matches CPU implementation exactly
         let sym_divergence_shader_source = r#"
             @group(0) @binding(0) var<storage, read> input_data: array<f32>;
             @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
@@ -251,22 +272,26 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
-                let prev_x = (idx.x + width - 1u) % width;
-                let prev_y = (idx.y + height - 1u) % height;
-                let prev_x_idx = idx.y * width + prev_x;
-                let prev_y_idx = prev_y * width + idx.x;
                 
                 // Input has 3 components per pixel (q tensor field)
                 let q0_curr = input_data[linear_idx * 3u];     // q_xx
-                let q1_curr = input_data[linear_idx * 3u + 1u]; // q_yy
+                let q1_curr = input_data[linear_idx * 3u + 1u]; // q_yy  
                 let q2_curr = input_data[linear_idx * 3u + 2u]; // q_xy
+                
+                // First component: -∂x q_0 - 0.5*∂y q_2 (backward differences)
+                let prev_x = (idx.x + width - 1u) % width;
+                let prev_x_idx = idx.y * width + prev_x;
                 let q0_prev_x = input_data[prev_x_idx * 3u];
-                let q1_prev_y = input_data[prev_y_idx * 3u + 1u];
                 let q2_prev_x = input_data[prev_x_idx * 3u + 2u];
+                
+                let prev_y = (idx.y + height - 1u) % height;
+                let prev_y_idx = prev_y * width + idx.x;
                 let q2_prev_y = input_data[prev_y_idx * 3u + 2u];
                 
-                // Symmetric divergence calculation with periodic boundaries
                 let div_x = -(q0_curr - q0_prev_x) - 0.5 * (q2_curr - q2_prev_y);
+                
+                // Second component: -∂y q_1 - 0.5*∂x q_2 (backward differences)
+                let q1_prev_y = input_data[prev_y_idx * 3u + 1u];
                 let div_y = -(q1_curr - q1_prev_y) - 0.5 * (q2_curr - q2_prev_x);
                 
                 // Store divergence (output has 2 components per pixel)
@@ -455,12 +480,13 @@ impl GpuTgvContext {
                 }
                 
                 let linear_idx = idx.y * width + idx.x;
+                
+                // Divergence of p with periodic boundaries - matches CPU exactly
                 let prev_x = (idx.x + width - 1u) % width;
                 let prev_y = (idx.y + height - 1u) % height;
                 let prev_x_idx = idx.y * width + prev_x;
                 let prev_y_idx = prev_y * width + idx.x;
                 
-                // Divergence of p with periodic boundaries - match standalone divergence shader exactly
                 let div_x = p_data[linear_idx * 2u] - p_data[prev_x_idx * 2u];
                 let div_y = p_data[linear_idx * 2u + 1u] - p_data[prev_y_idx * 2u + 1u];
                 let div_p = -(div_x + div_y);
@@ -503,6 +529,68 @@ impl GpuTgvContext {
                 // Update w
                 w_data[linear_idx * 2u] -= params.tau * (-p_data[linear_idx * 2u] + sym_div_q[linear_idx * 2u]);
                 w_data[linear_idx * 2u + 1u] -= params.tau * (-p_data[linear_idx * 2u + 1u] + sym_div_q[linear_idx * 2u + 1u]);
+            }
+        "#;
+
+        // Extrapolation shader for u_bar and w_bar  
+        let extrapolation_u_shader_source = r#"
+            @group(0) @binding(0) var<storage, read_write> u_bar_data: array<f32>;
+            @group(0) @binding(1) var<storage, read> u_data: array<f32>;
+            @group(0) @binding(2) var<storage, read> u_old_data: array<f32>;
+            @group(0) @binding(3) var<uniform> params: ExtrapolationParams;
+
+            struct ExtrapolationParams {
+                width: u32,
+                height: u32,
+                theta: f32,
+                _padding: u32,
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                let idx = global_id.xy;
+                let width = params.width;
+                let height = params.height;
+                
+                if (idx.x >= width || idx.y >= height) {
+                    return;
+                }
+                
+                let linear_idx = idx.y * width + idx.x;
+                
+                // u_bar = u + theta * (u - u_old)
+                u_bar_data[linear_idx] = u_data[linear_idx] + params.theta * (u_data[linear_idx] - u_old_data[linear_idx]);
+            }
+        "#;
+
+        let extrapolation_w_shader_source = r#"
+            @group(0) @binding(0) var<storage, read_write> w_bar_data: array<f32>;
+            @group(0) @binding(1) var<storage, read> w_data: array<f32>;
+            @group(0) @binding(2) var<storage, read> w_old_data: array<f32>;
+            @group(0) @binding(3) var<uniform> params: ExtrapolationParams;
+
+            struct ExtrapolationParams {
+                width: u32,
+                height: u32,
+                theta: f32,
+                _padding: u32,
+            }
+
+            @compute @workgroup_size(16, 16)
+            fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+                let idx = global_id.xy;
+                let width = params.width;
+                let height = params.height;
+                
+                if (idx.x >= width || idx.y >= height) {
+                    return;
+                }
+                
+                let linear_idx = idx.y * width + idx.x;
+                
+                // w_bar = w + theta * (w - w_old)  
+                w_bar_data[linear_idx * 2u] = w_data[linear_idx * 2u] + params.theta * (w_data[linear_idx * 2u] - w_old_data[linear_idx * 2u]);
+                w_bar_data[linear_idx * 2u + 1u] = w_data[linear_idx * 2u + 1u] + params.theta * (w_data[linear_idx * 2u + 1u] - w_old_data[linear_idx * 2u + 1u]);
             }
         "#;
 
@@ -555,6 +643,16 @@ impl GpuTgvContext {
         let update_w_shader = self.device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Update W Compute Shader"),
             source: ShaderSource::Wgsl(update_w_shader_source.into()),
+        });
+
+        let extrapolation_u_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Extrapolation U Compute Shader"),
+            source: ShaderSource::Wgsl(extrapolation_u_shader_source.into()),
+        });
+
+        let extrapolation_w_shader = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Extrapolation W Compute Shader"),
+            source: ShaderSource::Wgsl(extrapolation_w_shader_source.into()),
         });
 
         // Create bind group layout for 3-input operations (input, output, params)
@@ -821,6 +919,24 @@ impl GpuTgvContext {
             cache: None,
         }));
 
+        self.extrapolation_u_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Extrapolation U Pipeline"),
+            layout: Some(&update_pipeline_layout),
+            module: &extrapolation_u_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
+        self.extrapolation_w_pipeline = Some(self.device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("Extrapolation W Pipeline"),
+            layout: Some(&update_pipeline_layout),
+            module: &extrapolation_w_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        }));
+
         self.bind_group_layout = Some(bind_group_layout);
 
         Ok(())
@@ -894,6 +1010,19 @@ impl GpuTgvContext {
 
         let w_bar_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
             label: Some("W Bar Buffer"),
+            contents: bytemuck::cast_slice(&w_data),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        });
+
+        // Create u_old and w_old buffers for extrapolation 
+        let u_old_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("U Old Buffer"),
+            contents: bytemuck::cast_slice(&u_data),
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        });
+
+        let w_old_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("W Old Buffer"),
             contents: bytemuck::cast_slice(&w_data),
             usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         });
@@ -975,9 +1104,20 @@ impl GpuTgvContext {
         let workgroup_count_x = (nx + 15) / 16;
         let workgroup_count_y = (ny + 15) / 16;
 
+        // Initialize momentum variable
+        let mut t: f32 = 1.0;
+
         // Main TGV iteration loop
         for iteration in 0..max_iter {
             log!("GPU TGV iteration {}/{}", iteration + 1, max_iter);
+            
+            // Save current values as old values for extrapolation (copy at start of iteration)
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Save Old Values"),
+            });
+            encoder.copy_buffer_to_buffer(&u_buffer, 0, &u_old_buffer, 0, u_buffer.size());
+            encoder.copy_buffer_to_buffer(&w_buffer, 0, &w_old_buffer, 0, w_buffer.size());
+            self.queue.submit(Some(encoder.finish()));
             
             let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("TGV Iteration"),
@@ -1246,14 +1386,72 @@ impl GpuTgvContext {
             // Submit all updates
             self.queue.submit(Some(encoder.finish()));
 
-            // 11. Update u_bar and w_bar (extrapolation)
-            // For simplicity, we'll copy current values for now
-            // In a complete implementation, you'd implement proper extrapolation
-            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Update Extrapolation"),
+            // 11. Update u_bar and w_bar (proper extrapolation)
+            let t_old = t;
+            t = (1. + (1. + 4. * t_old.powi(2)).sqrt()) / 2.0;
+            let theta = (t_old - 1.) / t;
+            
+            // Create extrapolation parameter buffer
+            let extrapolation_params = ExtrapolationParams {
+                width: nx as u32,
+                height: ny as u32,
+                theta,
+                _padding: 0,
+            };
+            let extrapolation_params_buffer = self.device.create_buffer_init(&BufferInitDescriptor {
+                label: Some("Extrapolation Params Buffer"),
+                contents: bytemuck::cast_slice(&[extrapolation_params]),
+                usage: BufferUsages::UNIFORM,
             });
-            encoder.copy_buffer_to_buffer(&u_buffer, 0, &u_bar_buffer, 0, u_buffer.size());
-            encoder.copy_buffer_to_buffer(&w_buffer, 0, &w_bar_buffer, 0, w_buffer.size());
+
+            let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Extrapolation"),
+            });
+
+            // Extrapolate u_bar
+            {
+                let extrapolation_u_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Extrapolation U Bind Group"),
+                    layout: update_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: u_bar_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: u_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: u_old_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 3, resource: extrapolation_params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Extrapolation U Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.extrapolation_u_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &extrapolation_u_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
+            // Extrapolate w_bar
+            {
+                let extrapolation_w_bind_group = self.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Extrapolation W Bind Group"),
+                    layout: update_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry { binding: 0, resource: w_bar_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 1, resource: w_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 2, resource: w_old_buffer.as_entire_binding() },
+                        BindGroupEntry { binding: 3, resource: extrapolation_params_buffer.as_entire_binding() },
+                    ],
+                });
+
+                let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("Extrapolation W Compute Pass"),
+                    timestamp_writes: None,
+                });
+                compute_pass.set_pipeline(self.extrapolation_w_pipeline.as_ref().unwrap());
+                compute_pass.set_bind_group(0, &extrapolation_w_bind_group, &[]);
+                compute_pass.dispatch_workgroups(workgroup_count_x as u32, workgroup_count_y as u32, 1);
+            }
+
             self.queue.submit(Some(encoder.finish()));
         }
 
