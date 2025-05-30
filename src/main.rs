@@ -204,6 +204,9 @@ fn App() -> impl IntoView {
     let (zero_filled_recon_enabled, set_zero_filled_recon_enabled) = signal(true);
     let (compressed_sensing_recon_enabled, set_compressed_sensing_recon_enabled) = signal(false);
 
+    // GPU acceleration toggle (default: enabled)
+    let (gpu_acceleration_enabled, set_gpu_acceleration_enabled) = signal(true);
+
     // TGV2 parameters
     let (tgv2_lam, set_tgv2_lam) = signal(1.0);
     let (tgv2_iter, set_tgv2_iter) = signal(5 as usize);
@@ -220,6 +223,7 @@ fn App() -> impl IntoView {
         let fft_height = fft_height;
         let tgv2_lam = tgv2_lam.get_untracked();
         let tgv2_iter = tgv2_iter.get_untracked();
+        let use_gpu = gpu_acceleration_enabled.get_untracked();
         
         match mode {
             ReconMode::ZeroFilled => {
@@ -242,7 +246,8 @@ fn App() -> impl IntoView {
                     set_reconstructed_img_zero_filled, 
                     ReconMode::ZeroFilled, 
                     ReconParams { tgv2_lam, tgv2_iter },
-                    set_zero_filled_reconstruction_in_progress
+                    set_zero_filled_reconstruction_in_progress,
+                    use_gpu
                 );
             },
             ReconMode::TGV2 => {
@@ -265,7 +270,8 @@ fn App() -> impl IntoView {
                     set_reconstructed_img_compressed_sensing, 
                     ReconMode::TGV2, 
                     ReconParams { tgv2_lam, tgv2_iter },
-                    set_tgv_reconstruction_in_progress
+                    set_tgv_reconstruction_in_progress,
+                    use_gpu
                 );
             },
         }
@@ -642,6 +648,14 @@ fn App() -> impl IntoView {
                 checked=move || compressed_sensing_recon_enabled.get() />
             <label for="compressed_sensing_recon_enabled">"Compressed sensing (TGV2)"</label>
             <br />
+            <p>Acceleration:</p>
+            <input type="checkbox" name="gpu_acceleration_enabled" 
+                on:change=move |evt| {
+                    set_gpu_acceleration_enabled.set(event_target_checked(&evt));
+                }
+                checked=move || gpu_acceleration_enabled.get() />
+            <label for="gpu_acceleration_enabled">"GPU Acceleration (WebGPU)"</label>
+            <br />
             <button on:click=move |_| set_erase.set(false)>
                 "Draw"
             </button>
@@ -713,6 +727,7 @@ fn read_canvas_and_reconstruct(
     recon_mode: ReconMode,
     recon_params: ReconParams,
     set_reconstruction_in_progress: WriteSignal<bool>,
+    use_gpu: bool,
 ) {
     spawn_local(async move {
         let width = img_width.get() as usize;
@@ -836,17 +851,30 @@ fn read_canvas_and_reconstruct(
                     }
                 }
                 
-                // Use GPU-accelerated TGV with fallback
-                let tgv_result = tgv::tgv_mri_reconstruction_auto(
-                    &masked_fft_img.view(), 
-                    &mask.view(), 
-                    recon_params.tgv2_lam, 
-                    1.0, 
-                    2.0, 
-                    1.0/(12.0_f32).sqrt(), 
-                    1.0/(12.0_f32).sqrt(), 
-                    recon_params.tgv2_iter as usize
-                ).await;
+                // Use GPU-accelerated TGV with fallback or CPU-only TGV based on user preference
+                let tgv_result = if use_gpu {
+                    tgv::tgv_mri_reconstruction_auto(
+                        &masked_fft_img.view(), 
+                        &mask.view(), 
+                        recon_params.tgv2_lam, 
+                        1.0, 
+                        2.0, 
+                        1.0/(12.0_f32).sqrt(), 
+                        1.0/(12.0_f32).sqrt(), 
+                        recon_params.tgv2_iter as usize
+                    ).await
+                } else {
+                    tgv::tgv_mri_reconstruction(
+                        &masked_fft_img.view(), 
+                        &mask.view(), 
+                        recon_params.tgv2_lam, 
+                        1.0, 
+                        2.0, 
+                        1.0/(12.0_f32).sqrt(), 
+                        1.0/(12.0_f32).sqrt(), 
+                        recon_params.tgv2_iter as usize
+                    )
+                };
                 
                 // Crop back to original size
                 let mut cropped_result = Array2::<f32>::zeros((original_height, original_width));
